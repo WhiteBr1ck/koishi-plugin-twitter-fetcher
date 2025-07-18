@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-twitter-fetcher",
   "description": "自动解析 推特Twitter/X 链接，聚合推文截图、文本、图片和视频。",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
@@ -10,6 +10,14 @@
   ],
   "author": "whitebr1ck",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/WhiteBr1ck/koishi-plugin-twitter-fetcher.git"
+  },
+  "bugs": {
+    "url": "https://github.com/WhiteBr1ck/koishi-plugin-twitter-fetcher/issues"
+  },
+  "homepage": "https://github.com/WhiteBr1ck/koishi-plugin-twitter-fetcher#readme",
   "keywords": [
     "koishi",
     "plugin",
