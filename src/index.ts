@@ -19,80 +19,86 @@ declare module 'koishi' {
   }
 }
 
-// 插件的配置接口
-export interface Config {
-  // 解析设置
-  showScreenshot: boolean
-  sendText: boolean
-  sendMedia: boolean
-  cookie: string
-  useForward: boolean
-  // 订阅推送内容设置
-  sub_showLink: boolean
-  sub_showScreenshot: boolean
-  sub_sendText: boolean
-  sub_sendMedia: boolean
-  sub_useForward: boolean
-  // 订阅设置
-  enableSubscription: boolean
-  platform: string
-  selfId: string
-  updateInterval: number
-  subscriptions: {
-    username: string
-    groupIds: string[]
-  }[]
-  // 调试设置
-  logDetails: boolean
+// 定义所有通用的、无条件的配置项
+interface BaseConfig {
+  showScreenshot: boolean;
+  sendText: boolean;
+  sendMedia: boolean;
+  cookie: string;
+  useForward: boolean;
+  sub_showLink: boolean;
+  sub_showScreenshot: boolean;
+  sub_sendText: boolean;
+  sub_sendMedia: boolean;
+  sub_useForward: boolean;
+  logDetails: boolean;
 }
 
+// 定义两种订阅状态：关闭时和开启时，形成“可辨识联合类型”
+type SubscriptionConfig = {
+  enableSubscription: false;
+} | {
+  enableSubscription: true;
+  platform: string;
+  selfId: string;
+  updateInterval: number;
+  subscriptions: {
+    username: string;
+    groupIds: string[];
+  }[];
+};
+
+export type Config = BaseConfig & SubscriptionConfig;
+
+
 export const Config: Schema<Config> = Schema.intersect([
-  Schema.object({}).description('**Twitter Fetcher 插件配置**'),
-  // 第 1 块: 解析设置 (当用户在聊天中发送链接时)
+  // 第 1 块: 解析设置
   Schema.object({
-    showScreenshot: Schema.boolean().description('是否发送推文截图.').default(true),
-    sendText: Schema.boolean().description('是否发送提取的推文文本.').default(true),
-    sendMedia: Schema.boolean().description('是否发送推文中的图片和视频.').default(true),
+    showScreenshot: Schema.boolean().description('是否发送推文截图。').default(true),
+    sendText: Schema.boolean().description('是否发送提取的推文文本。').default(true),
+    sendMedia: Schema.boolean().description('是否发送推文中的图片和视频。').default(true),
     cookie: Schema.string().role('textarea').description('Twitter/X 登录 Cookie(auth_token).'),
     useForward: Schema.boolean().description('是否使用合并转发的形式发送(仅 QQ 平台效果最佳).').default(false),
   }).description('解析设置 - 当手动发送链接时生效'),
 
-  // 第 2 块: 订阅推送内容设置 (当插件自动推送新推文时)
+  // 第 2 块: 订阅推送内容设置
   Schema.object({
-    sub_showLink: Schema.boolean().description('推送时, 是否在消息顶部附带原始推文链接.').default(true),
-    sub_showScreenshot: Schema.boolean().description('推送时, 是否发送推文截图.').default(true),
-    sub_sendText: Schema.boolean().description('推送时, 是否发送提取的推文文本.').default(true),
-    sub_sendMedia: Schema.boolean().description('推送时, 是否发送推文中的图片和视频.').default(true),
-    sub_useForward: Schema.boolean().description('推送时, 是否使用合并转发.').default(false),
+    sub_showLink: Schema.boolean().description('推送时, 是否在消息顶部附带原始推文链接。').default(true),
+    sub_showScreenshot: Schema.boolean().description('推送时, 是否发送推文截图。').default(true),
+    sub_sendText: Schema.boolean().description('推送时, 是否发送提取的推文文本。').default(true),
+    sub_sendMedia: Schema.boolean().description('推送时, 是否发送推文中的图片和视频。').default(true),
+    sub_useForward: Schema.boolean().description('推送时, 是否使用合并转发。').default(false),
   }).description('订阅推送内容设置 - 当自动推送订阅时生效'),
 
-  // 第 3 块: 订阅总开关及详细设置
+  // 第 3 块: 订阅总开关及详细设置 (使用你原来的结构，这是正确的！)
   Schema.intersect([
+    Schema.object({
+      // 这个 enableSubscription 同时作为总开关和 UI 上的一个可见项
+      enableSubscription: Schema.boolean().description('**【总开关】是否启用订阅功能。** 开启后会显示详细设置。').default(false),
+    }).description('订阅设置'), // 这是分组的标题
+    // union 部分负责根据开关状态显示或隐藏其他字段
+    Schema.union([
       Schema.object({
-          enableSubscription: Schema.boolean().description('**【总开关】是否启用订阅功能。** 开启后会显示详细设置。').default(false),
-      }).description('订阅设置'),
-      Schema.union([
-          Schema.object({
-              enableSubscription: Schema.const(false),
-          }),
-          Schema.object({
-              enableSubscription: Schema.const(true),
-              platform: Schema.string().description('用于执行推送的机器人平台 (例如: onebot)。').required(),
-              selfId: Schema.string().description('用于执行推送的机器人账号/ID (例如: 12345678)。').required(),
-              updateInterval: Schema.number().min(1).description('每隔多少分钟检查一次更新。').default(5),
-              subscriptions: Schema.array(Schema.object({
-                  username: Schema.string().description('推特用户名'),
-                  groupIds: Schema.array(String).role('table').description('需要推送的群号列表'),
-              })).role('table').description('订阅列表'),
-          })
-      ])
+        enableSubscription: Schema.const(false), // 关闭时，没有额外字段
+      }),
+      Schema.object({
+        enableSubscription: Schema.const(true), // 开启时，加载所有必填字段
+        platform: Schema.string().description('用于执行推送的机器人平台 (例如: onebot)。').required(),
+        selfId: Schema.string().description('用于执行推送的机器人账号/ID (例如: 12345678)。').required(),
+        updateInterval: Schema.number().min(1).description('每隔多少分钟检查一次更新。').default(5),
+        subscriptions: Schema.array(Schema.object({
+            username: Schema.string().description('推特用户名'),
+            groupIds: Schema.array(String).role('table').description('需要推送的群号列表'),
+        })).role('table').description('订阅列表'),
+      }),
+    ]),
   ]),
 
   // 第 4 块: 调试设置
   Schema.object({
-    logDetails: Schema.boolean().description('是否在控制台输出详细的调试日志.').default(false),
+    logDetails: Schema.boolean().description('是否在控制台输出详细的调试日志。').default(false),
   }).description('调试设置'),
-])
+]) as Schema<Config>; // 使用类型断言告诉编译器，我们确信这个结构是符合 Config 类型的
 
 
 // 正则表达式, 用于从消息中匹配推文链接
@@ -260,6 +266,9 @@ export function apply(ctx: Context, config: Config) {
   
   // 订阅功能核心: 检查并推送更新
   async function checkAndPushUpdates(isManualTrigger = false) {
+    // 关键修正 3: 添加类型守卫, 确保在订阅关闭时函数直接退出
+    if (!config.enableSubscription) return;
+
     if (config.logDetails) logger.info('[订阅] 开始新一轮更新检查...');
     const botKey = `${config.platform}:${config.selfId}`;
     const bot = ctx.bots[botKey];
