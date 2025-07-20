@@ -6,20 +6,18 @@ export const inject = {
   required: ['puppeteer', 'database'],
 }
 
-// 在顶级作用域创建 Logger 实例
 const logger = new Logger(name)
 
-// 在 Koishi 的 Table 模块中声明 twitter_subscriptions 表的结构
 declare module 'koishi' {
   interface Tables {
     twitter_subscriptions: {
-      id: string // 用户名作为主键
-      last_tweet_url: string // 上次记录的最新推文 URL
+      id: string
+      last_tweet_url: string
     }
   }
 }
 
-// 定义所有通用的、无条件的配置项
+// ===== 类型定义部分 =====
 interface BaseConfig {
   showScreenshot: boolean;
   sendText: boolean;
@@ -34,7 +32,6 @@ interface BaseConfig {
   logDetails: boolean;
 }
 
-// 定义两种订阅状态：关闭时和开启时，形成“可辨识联合类型”
 type SubscriptionConfig = {
   enableSubscription: false;
 } | {
@@ -50,9 +47,9 @@ type SubscriptionConfig = {
 
 export type Config = BaseConfig & SubscriptionConfig;
 
-
+// ===== Schema 定义部分 =====
 export const Config: Schema<Config> = Schema.intersect([
-  // 第 1 块: 解析设置
+  // --- 第 1 块: 解析设置 ---
   Schema.object({
     showScreenshot: Schema.boolean().description('是否发送推文截图。').default(true),
     sendText: Schema.boolean().description('是否发送提取的推文文本。').default(true),
@@ -61,7 +58,7 @@ export const Config: Schema<Config> = Schema.intersect([
     useForward: Schema.boolean().description('是否使用合并转发的形式发送(仅 QQ 平台效果最佳).').default(false),
   }).description('解析设置 - 当手动发送链接时生效'),
 
-  // 第 2 块: 订阅推送内容设置
+  // --- 第 2 块: 订阅推送内容设置 ---
   Schema.object({
     sub_showLink: Schema.boolean().description('推送时, 是否在消息顶部附带原始推文链接。').default(true),
     sub_showScreenshot: Schema.boolean().description('推送时, 是否发送推文截图。').default(true),
@@ -70,36 +67,37 @@ export const Config: Schema<Config> = Schema.intersect([
     sub_useForward: Schema.boolean().description('推送时, 是否使用合并转发。').default(false),
   }).description('订阅推送内容设置 - 当自动推送订阅时生效'),
 
-  // 第 3 块: 订阅总开关及详细设置 (使用你原来的结构，这是正确的！)
-  Schema.intersect([
+  // --- 第 3 块: 订阅设置 ---
+  // 第一部分：仅用于在 UI 上创建“订阅设置”分组和那个可见的布尔开关
+  Schema.object({
+    enableSubscription: Schema.boolean().description('**【总开关】是否启用订阅功能。** 开启后会显示详细设置。').default(false),
+  }).description('订阅设置'),
+
+  // 第二部分：根据 enableSubscription 的值，来决定是否显示下方的详细配置
+  Schema.union([
     Schema.object({
-      // 这个 enableSubscription 同时作为总开关和 UI 上的一个可见项
-      enableSubscription: Schema.boolean().description('**【总开关】是否启用订阅功能。** 开启后会显示详细设置。').default(false),
-    }).description('订阅设置'), // 这是分组的标题
-    // union 部分负责根据开关状态显示或隐藏其他字段
-    Schema.union([
-      Schema.object({
-        enableSubscription: Schema.const(false), // 关闭时，没有额外字段
-      }),
-      Schema.object({
-        enableSubscription: Schema.const(true), // 开启时，加载所有必填字段
-        platform: Schema.string().description('用于执行推送的机器人平台 (例如: onebot)。').required(),
-        selfId: Schema.string().description('用于执行推送的机器人账号/ID (例如: 12345678)。').required(),
-        updateInterval: Schema.number().min(1).description('每隔多少分钟检查一次更新。').default(5),
-        subscriptions: Schema.array(Schema.object({
-            username: Schema.string().description('推特用户名'),
-            groupIds: Schema.array(String).role('table').description('需要推送的群号列表'),
-        })).role('table').description('订阅列表'),
-      }),
-    ]),
+      enableSubscription: Schema.const(false), // 当开关为 false 时，此对象生效，不添加任何额外字段
+    }),
+    Schema.object({
+      enableSubscription: Schema.const(true), // 当开关为 true 时，此对象生效，加载所有必填字段
+      platform: Schema.string().description('用于执行推送的机器人平台 (例如: onebot)。').required(),
+      selfId: Schema.string().description('用于执行推送的机器人账号/ID (例如: 12345678)。').required(),
+      updateInterval: Schema.number().min(1).description('每隔多少分钟检查一次更新。').default(5),
+      subscriptions: Schema.array(Schema.object({
+          username: Schema.string().description('推特用户名'),
+          groupIds: Schema.array(String).role('table').description('需要推送的群号列表'),
+      })).role('table').description('订阅列表'),
+    }),
   ]),
 
-  // 第 4 块: 调试设置
+  // --- 第 4 块: 调试设置 ---
   Schema.object({
     logDetails: Schema.boolean().description('是否在控制台输出详细的调试日志。').default(false),
   }).description('调试设置'),
-]) as Schema<Config>; // 使用类型断言告诉编译器，我们确信这个结构是符合 Config 类型的
+]) as Schema<Config>;
 
+
+// ===== 插件 apply 函数及其他逻辑 =====
 
 // 正则表达式, 用于从消息中匹配推文链接
 const TWEET_URL_REGEX = /https?:\/\/(twitter\.com|x\.com)\/(\w+)\/status\/(\d+)/g
@@ -266,7 +264,6 @@ export function apply(ctx: Context, config: Config) {
   
   // 订阅功能核心: 检查并推送更新
   async function checkAndPushUpdates(isManualTrigger = false) {
-    // 关键修正 3: 添加类型守卫, 确保在订阅关闭时函数直接退出
     if (!config.enableSubscription) return;
 
     if (config.logDetails) logger.info('[订阅] 开始新一轮更新检查...');
