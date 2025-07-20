@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-twitter-fetcher",
-  "description": "自动解析 推特Twitter/X 链接，聚合推文截图、文本、图片和视频。",
-  "version": "0.0.4",
+  "description": "一个推特/Twitter/X内容获取与订阅插件，支持链接实时解析和用户后台订阅推送。",
+  "version": "1.0.0",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
@@ -25,7 +25,10 @@
     "x",
     "fetcher",
     "parse",
-    "resolver"
+    "resolver",
+    "subscribe",
+    "subscription",
+    "push"
   ],
   "peerDependencies": {
     "koishi": "^4.18.7",
@@ -33,11 +36,12 @@
   },
   "koishi": {
     "description": {
-      "zh": "自动解析 推特/Twitter/X 链接，聚合推文截图、文本、图片和视频。"
+      "zh": "自动解析推特/Twitter/X链接，聚合内容。现已支持订阅推送！"
     },
     "service": {
       "required": [
-        "puppeteer"
+        "puppeteer",
+        "database"
       ]
     }
   }
