@@ -29,6 +29,11 @@ interface BaseConfig {
   sub_sendText: boolean;
   sub_sendMedia: boolean;
   sub_useForward: boolean;
+  // 翻译配置类型
+  parse_enableTranslation: boolean;
+  parse_targetLang: string;
+  sub_enableTranslation: boolean;
+  sub_targetLang: string;
   logDetails: boolean;
 }
 
@@ -48,6 +53,19 @@ type SubscriptionConfig = {
 export type Config = BaseConfig & SubscriptionConfig;
 
 // ===== Schema 定义部分 =====
+// 定义一个可复用的语言下拉列表 Schema
+const langSelectSchema = Schema.union([
+  Schema.const('zh-CN').description('简体中文'),
+  Schema.const('zh-TW').description('繁體中文'),
+  Schema.const('en').description('English'),
+  Schema.const('ja').description('日本語'),
+  Schema.const('ko').description('한국어'),
+  Schema.const('ru').description('Русский'),
+  Schema.const('fr').description('Français'),
+  Schema.const('de').description('Deutsch'),
+]).description('翻译的目标语言。');
+
+
 export const Config: Schema<Config> = Schema.intersect([
   // --- 第 1 块: 解析设置 ---
   Schema.object({
@@ -67,19 +85,25 @@ export const Config: Schema<Config> = Schema.intersect([
     sub_useForward: Schema.boolean().description('推送时, 是否使用合并转发。').default(false),
   }).description('订阅推送内容设置 - 当自动推送订阅时生效'),
 
-  // --- 第 3 块: 订阅设置 ---
-  // 第一部分：仅用于在 UI 上创建“订阅设置”分组和那个可见的布尔开关
+  // ===== 第 3 块: 独立的翻译设置块 =====
+  Schema.object({
+    parse_enableTranslation: Schema.boolean().description('**【手动解析】** 是否开启翻译。当手动发送链接时生效。').default(false),
+    parse_targetLang: langSelectSchema.default('zh-CN'),
+    sub_enableTranslation: Schema.boolean().description('**【订阅推送】** 是否开启翻译。当自动推送订阅时生效。').default(false),
+    sub_targetLang: langSelectSchema.default('zh-CN'),
+  }).description('翻译设置'),
+  
+  // --- 第 4 块: 订阅设置 ---
   Schema.object({
     enableSubscription: Schema.boolean().description('**【总开关】是否启用订阅功能。** 开启后会显示详细设置。').default(false),
   }).description('订阅设置'),
 
-  // 第二部分：根据 enableSubscription 的值，来决定是否显示下方的详细配置
   Schema.union([
     Schema.object({
-      enableSubscription: Schema.const(false), // 当开关为 false 时，此对象生效，不添加任何额外字段
+      enableSubscription: Schema.const(false),
     }),
     Schema.object({
-      enableSubscription: Schema.const(true), // 当开关为 true 时，此对象生效，加载所有必填字段
+      enableSubscription: Schema.const(true),
       platform: Schema.string().description('用于执行推送的机器人平台 (例如: onebot)。').required(),
       selfId: Schema.string().description('用于执行推送的机器人账号/ID (例如: 12345678)。').required(),
       updateInterval: Schema.number().min(1).description('每隔多少分钟检查一次更新。').default(5),
@@ -90,7 +114,7 @@ export const Config: Schema<Config> = Schema.intersect([
     }),
   ]),
 
-  // --- 第 4 块: 调试设置 ---
+  // --- 第 5 块: 调试设置 ---
   Schema.object({
     logDetails: Schema.boolean().description('是否在控制台输出详细的调试日志。').default(false),
   }).description('调试设置'),
@@ -99,10 +123,26 @@ export const Config: Schema<Config> = Schema.intersect([
 
 // ===== 插件 apply 函数及其他逻辑 =====
 
-// 正则表达式, 用于从消息中匹配推文链接
 const TWEET_URL_REGEX = /https?:\/\/(twitter\.com|x\.com)\/(\w+)\/status\/(\d+)/g
 
-// 使用 Puppeteer 获取指定用户的最新推文链接
+async function translateText(ctx: Context, text: string, targetLang: string, log?: (message: string) => void): Promise<string | null> {
+  if (!text) return null;
+  const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${targetLang}&dt=t&q=${encodeURIComponent(text)}`;
+  try {
+    log?.(`调用谷歌翻译 API...`);
+    const response = await ctx.http.get<any[]>(url);
+    if (response && response[0]) {
+      const translatedText = response[0].map(item => item[0]).join('');
+      log?.(`翻译成功, 目标语言: ${targetLang}.`);
+      return translatedText;
+    }
+    return null;
+  } catch (error) {
+    logger.warn(`[翻译] 调用谷歌翻译 API 失败:`, error);
+    return null;
+  }
+}
+
 async function getLatestTweetUrlByPuppeteer(puppeteer: Puppeteer, username: string, cookie?: string, log?: (message: string) => void): Promise<string | null> {
   log?.(`正在访问用户主页: https://x.com/${username}`);
   const page = await puppeteer.page();
@@ -130,7 +170,6 @@ async function getLatestTweetUrlByPuppeteer(puppeteer: Puppeteer, username: stri
   }
 }
 
-// 使用 Puppeteer 获取指定推文的截图
 async function getTweetScreenshot(puppeteer: Puppeteer, url: string, cookie?: string, log?: (message: string) => void): Promise<Buffer> {
     const page = await puppeteer.page()
     try {
@@ -151,23 +190,30 @@ export function apply(ctx: Context, config: Config) {
 
   ctx.model.extend('twitter_subscriptions', { id: 'string', last_tweet_url: 'string' }, { primary: 'id' });
 
-  // 日志系统: 步骤化日志记录器
   const createLogStepper = (prefix: string) => {
     let step = 1;
     return (message: string, isWarning = false) => {
       if (config.logDetails) {
         const logMessage = `[${prefix}] [步骤 ${step++}] ${message}`;
-        if (isWarning) {
-          logger.warn(logMessage);
-        } else {
-          logger.info(logMessage);
-        }
+        if (isWarning) logger.warn(logMessage);
+        else logger.info(logMessage);
       }
     };
   };
 
-  // 核心功能: 处理单个推文链接
-  async function processTweet(tweetUrl: string, options: { showLink?: boolean; showScreenshot: boolean; sendText: boolean; sendMedia: boolean; useForward: boolean; platform?: string }) {
+  async function processTweet(
+    tweetUrl: string, 
+    options: { 
+      showLink?: boolean; 
+      showScreenshot: boolean; 
+      sendText: boolean; 
+      sendMedia: boolean; 
+      useForward: boolean; 
+      platform?: string;
+      enableTranslation?: boolean;
+      targetLang?: string;
+    }
+  ) {
     const log = createLogStepper(tweetUrl);
     log(`开始处理推文`);
 
@@ -201,7 +247,25 @@ export function apply(ctx: Context, config: Config) {
       log('成功接收到 vxtwitter API 的响应.');
 
       if (apiResponse.user_screen_name) textParts.push(`用户ID: ${apiResponse.user_screen_name}`);
-      if (apiResponse.text && options.sendText) textParts.push(`推文内容: ${apiResponse.text}`);
+      
+      let originalTweetText = '';
+      if (apiResponse.text) {
+        originalTweetText = apiResponse.text;
+      }
+
+      if (options.sendText && originalTweetText) {
+        textParts.push(`推文内容: ${originalTweetText}`);
+
+        if (options.enableTranslation && options.targetLang) {
+          log('检测到翻译已开启.');
+          const translatedText = await translateText(ctx, originalTweetText, options.targetLang, log);
+          if (translatedText) {
+            textParts.push(`\n【谷歌翻译 (${options.targetLang})】:\n${translatedText}`);
+          } else {
+            log('翻译失败或返回空内容.', true);
+          }
+        }
+      }
       
       if (screenshotElement) mediaParts.push(screenshotElement);
 
@@ -212,7 +276,7 @@ export function apply(ctx: Context, config: Config) {
             const file = await http.file(media.url);
             const dataUri = `data:${file.mime};base64,${Buffer.from(file.data).toString('base64')}`;
             if (media.type === 'image') mediaParts.push(h.image(dataUri));
-            else if (media.type === 'video') mediaParts.push(h.video(dataUri));
+            else if (media.type === 'video' || media.type === 'gif') mediaParts.push(h.video(dataUri));
             log(`媒体文件 ${index + 1}/${apiResponse.media_extended.length} (${media.type}) 下载并转换成功.`);
           } catch (error) {
             log(`下载媒体文件失败: ${media.url}, 错误: ${error.message}`, true);
@@ -241,7 +305,7 @@ export function apply(ctx: Context, config: Config) {
     }
   }
 
-  // 中间件: 监听消息中的推文链接
+  // 中间件: 监听并处理手动发送的链接
   ctx.middleware(async (session, next) => {
     TWEET_URL_REGEX.lastIndex = 0;
     const match = TWEET_URL_REGEX.exec(session.content)
@@ -249,6 +313,7 @@ export function apply(ctx: Context, config: Config) {
     
     const statusMessage = await session.send(h('quote', { id: session.messageId }) + '正在解析推文链接, 请稍候...')
     
+    // ===== 使用【手动解析】的翻译设置 =====
     const messageToSend = await processTweet(match[0], {
       showLink: false,
       showScreenshot: config.showScreenshot,
@@ -256,6 +321,8 @@ export function apply(ctx: Context, config: Config) {
       sendMedia: config.sendMedia,
       useForward: config.useForward,
       platform: session.platform,
+      enableTranslation: config.parse_enableTranslation,
+      targetLang: config.parse_targetLang,
     })
     
     await session.send(messageToSend);
@@ -301,6 +368,7 @@ export function apply(ctx: Context, config: Config) {
           logger.info(`[订阅] ★★★ 发现 [${sub.username}] 的新推文! ★★★`);
           log(`准备推送新内容: ${latestTweetUrl}`);
 
+          // ===== 使用【订阅推送】的翻译设置 =====
           const messageToSend = await processTweet(latestTweetUrl, {
             showLink: config.sub_showLink,
             showScreenshot: config.sub_showScreenshot,
@@ -308,6 +376,8 @@ export function apply(ctx: Context, config: Config) {
             sendMedia: config.sub_sendMedia,
             useForward: config.sub_useForward,
             platform: bot.platform,
+            enableTranslation: config.sub_enableTranslation,
+            targetLang: config.sub_targetLang,
           });
           
           for (const groupId of sub.groupIds) {
@@ -346,7 +416,8 @@ export function apply(ctx: Context, config: Config) {
           if (!latestTweetUrl) return '无法找到该用户的最新推文链接.';
           
           await session.send(`成功获取到最新推文链接: ${latestTweetUrl}\n正在生成内容...`);
-
+          
+          // 测试时使用【订阅推送】的翻译设置, 以便预览自动推送的效果
           const messageToSend = await processTweet(latestTweetUrl, {
             showLink: config.sub_showLink,
             showScreenshot: config.sub_showScreenshot,
@@ -354,6 +425,8 @@ export function apply(ctx: Context, config: Config) {
             sendMedia: config.sub_sendMedia,
             useForward: config.sub_useForward,
             platform: session.platform,
+            enableTranslation: config.sub_enableTranslation,
+            targetLang: config.sub_targetLang,
           });
           await session.send(messageToSend);
         } catch (error) {
