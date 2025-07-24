@@ -77,6 +77,8 @@
 *   **`subscriptions`**: 你的订阅列表。这是一个表格，你可以添加多行：
     *   **`username`**: 你要订阅的推特用户名 (例如 `elonmusk`)。
     *   **`groupIds`**: 一个或多个群号的列表，新推文将会被推送到这些群。
+    *   **`excludeRetweets`**: 是否排除转推(Repost)？
+
 
 ### 5. 调试设置
 

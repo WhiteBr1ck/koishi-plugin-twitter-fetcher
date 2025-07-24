@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-twitter-fetcher",
   "description": "一个推特/Twitter/X内容获取与订阅插件，支持链接实时解析和用户后台订阅推送。",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [

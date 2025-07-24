@@ -47,13 +47,13 @@ type SubscriptionConfig = {
   subscriptions: {
     username: string;
     groupIds: string[];
+    excludeRetweets?: boolean;
   }[];
 };
 
 export type Config = BaseConfig & SubscriptionConfig;
 
 // ===== Schema 定义部分 =====
-// 定义一个可复用的语言下拉列表 Schema
 const langSelectSchema = Schema.union([
   Schema.const('zh-CN').description('简体中文'),
   Schema.const('zh-TW').description('繁體中文'),
@@ -67,7 +67,6 @@ const langSelectSchema = Schema.union([
 
 
 export const Config: Schema<Config> = Schema.intersect([
-  // --- 第 1 块: 解析设置 ---
   Schema.object({
     showScreenshot: Schema.boolean().description('是否发送推文截图。').default(true),
     sendText: Schema.boolean().description('是否发送提取的推文文本。').default(true),
@@ -76,7 +75,6 @@ export const Config: Schema<Config> = Schema.intersect([
     useForward: Schema.boolean().description('是否使用合并转发的形式发送(仅 QQ 平台效果最佳).').default(false),
   }).description('解析设置 - 当手动发送链接时生效'),
 
-  // --- 第 2 块: 订阅推送内容设置 ---
   Schema.object({
     sub_showLink: Schema.boolean().description('推送时, 是否在消息顶部附带原始推文链接。').default(true),
     sub_showScreenshot: Schema.boolean().description('推送时, 是否发送推文截图。').default(true),
@@ -85,7 +83,6 @@ export const Config: Schema<Config> = Schema.intersect([
     sub_useForward: Schema.boolean().description('推送时, 是否使用合并转发。').default(false),
   }).description('订阅推送内容设置 - 当自动推送订阅时生效'),
 
-  // ===== 第 3 块: 独立的翻译设置块 =====
   Schema.object({
     parse_enableTranslation: Schema.boolean().description('**【手动解析】** 是否开启翻译。当手动发送链接时生效。').default(false),
     parse_targetLang: langSelectSchema.default('zh-CN'),
@@ -93,7 +90,6 @@ export const Config: Schema<Config> = Schema.intersect([
     sub_targetLang: langSelectSchema.default('zh-CN'),
   }).description('翻译设置'),
   
-  // --- 第 4 块: 订阅设置 ---
   Schema.object({
     enableSubscription: Schema.boolean().description('**【总开关】是否启用订阅功能。** 开启后会显示详细设置。').default(false),
   }).description('订阅设置'),
@@ -110,11 +106,11 @@ export const Config: Schema<Config> = Schema.intersect([
       subscriptions: Schema.array(Schema.object({
           username: Schema.string().description('推特用户名'),
           groupIds: Schema.array(String).role('table').description('需要推送的群号列表'),
+          excludeRetweets: Schema.boolean().description('是否排除转推(Repost)？').default(true),
       })).role('table').description('订阅列表'),
     }),
   ]),
 
-  // --- 第 5 块: 调试设置 ---
   Schema.object({
     logDetails: Schema.boolean().description('是否在控制台输出详细的调试日志。').default(false),
   }).description('调试设置'),
@@ -143,27 +139,39 @@ async function translateText(ctx: Context, text: string, targetLang: string, log
   }
 }
 
-async function getLatestTweetUrlByPuppeteer(puppeteer: Puppeteer, username: string, cookie?: string, log?: (message: string) => void): Promise<string | null> {
+// ===== 更新 Puppeteer 函数以识别 "reposted" =====
+async function getLatestTweetUrlByPuppeteer(puppeteer: Puppeteer, username: string, cookie: string | undefined, excludeRetweets: boolean, log?: (message: string) => void): Promise<string | null> {
   log?.(`正在访问用户主页: https://x.com/${username}`);
   const page = await puppeteer.page();
   try {
     if (cookie) await page.setCookie({ name: 'auth_token', value: cookie, domain: '.x.com', path: '/', httpOnly: true, secure: true });
     await page.goto(`https://x.com/${username}`, { waitUntil: 'networkidle2', timeout: 30000 });
     await page.waitForSelector('article[data-testid="tweet"]', { timeout: 20000 });
-    const latestTweetUrl = await page.evaluate(() => {
+    
+    const latestTweetUrl = await page.evaluate((excludeRetweets) => {
       const articles = document.querySelectorAll('article[data-testid="tweet"]');
       for (const article of articles) {
-        if (article.querySelector('[data-testid="socialContext"]')?.textContent.includes('Pinned')) continue;
+        const socialContextEl = article.querySelector('[data-testid="socialContext"]');
+        if (socialContextEl) {
+          const contextText = socialContextEl.textContent || '';
+          if (contextText.includes('Pinned')) continue;
+          
+          // 同时检查新旧两种关键词，确保兼容性
+          if (excludeRetweets && (contextText.includes('Retweeted') || contextText.includes('reposted') || contextText.includes('转推'))) {
+            continue;
+          }
+        }
         const link = article.querySelector('a[href*="/status/"]');
         if (link) return (link as HTMLAnchorElement).href;
       }
       return null;
-    });
+    }, excludeRetweets);
+
     if (latestTweetUrl) {
-      log?.(`成功获取到最新推文链接: ${latestTweetUrl}`);
+      log?.(`成功获取到最新推文链接(已应用转推排除规则): ${latestTweetUrl}`);
       return latestTweetUrl;
     }
-    logger.warn(`[Puppeteer] 在 ${username} 的主页上未能找到任何推文链接.`);
+    logger.warn(`[Puppeteer] 在 ${username} 的主页上未能找到任何符合条件的推文链接.`);
     return null;
   } finally {
     await page.close();
@@ -313,7 +321,6 @@ export function apply(ctx: Context, config: Config) {
     
     const statusMessage = await session.send(h('quote', { id: session.messageId }) + '正在解析推文链接, 请稍候...')
     
-    // ===== 使用【手动解析】的翻译设置 =====
     const messageToSend = await processTweet(match[0], {
       showLink: false,
       showScreenshot: config.showScreenshot,
@@ -350,7 +357,10 @@ export function apply(ctx: Context, config: Config) {
       log('开始处理此用户的订阅.');
 
       try {
-        const latestTweetUrl = await getLatestTweetUrlByPuppeteer(ctx.puppeteer, sub.username, config.cookie, log);
+        const excludeRetweets = sub.excludeRetweets ?? true;
+        log(`转推排除设置为: ${excludeRetweets}`);
+        const latestTweetUrl = await getLatestTweetUrlByPuppeteer(ctx.puppeteer, sub.username, config.cookie, excludeRetweets, log);
+        
         if (!latestTweetUrl) {
             log('未能获取到最新推文链接, 跳过.', true);
             continue;
@@ -368,7 +378,6 @@ export function apply(ctx: Context, config: Config) {
           logger.info(`[订阅] ★★★ 发现 [${sub.username}] 的新推文! ★★★`);
           log(`准备推送新内容: ${latestTweetUrl}`);
 
-          // ===== 使用【订阅推送】的翻译设置 =====
           const messageToSend = await processTweet(latestTweetUrl, {
             showLink: config.sub_showLink,
             showScreenshot: config.sub_showScreenshot,
@@ -412,12 +421,11 @@ export function apply(ctx: Context, config: Config) {
         await session.send(`正在为 [${username}] 获取最新推文并模拟推送到当前会话...`);
         const log = createLogStepper(`测试:${username}`);
         try {
-          const latestTweetUrl = await getLatestTweetUrlByPuppeteer(ctx.puppeteer, username, config.cookie, log);
-          if (!latestTweetUrl) return '无法找到该用户的最新推文链接.';
+          const latestTweetUrl = await getLatestTweetUrlByPuppeteer(ctx.puppeteer, username, config.cookie, true, log);
+          if (!latestTweetUrl) return '无法找到该用户的最新推文链接(已排除转推).';
           
           await session.send(`成功获取到最新推文链接: ${latestTweetUrl}\n正在生成内容...`);
           
-          // 测试时使用【订阅推送】的翻译设置, 以便预览自动推送的效果
           const messageToSend = await processTweet(latestTweetUrl, {
             showLink: config.sub_showLink,
             showScreenshot: config.sub_showScreenshot,
