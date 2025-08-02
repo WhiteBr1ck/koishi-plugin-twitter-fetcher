@@ -168,3 +168,7 @@
 *   **`vxtwitter.com`**: 提供了稳定、好用的推文解析 API。
 *   **shangxue 的 `bilibili-videolink-analysis` 插件**: 本插件的文件处理方案深受其启发，特此感谢。
 *   特别鸣谢：Google Gemini 2.5 Pro。
+
+##  更新日志
+
+*   **v1.1.2**：所有 `h.image()` 和 `h.video()` 的调用不再使用 Base64 字符串，改用 `buffer` 发送媒体文件。在订阅轮询任务中，处理完一个用户的推送后，会增加 3 秒的延迟再处理下一个用户。

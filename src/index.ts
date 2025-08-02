@@ -1,4 +1,4 @@
-import { Context, Schema, h, Logger, Time, Bot } from 'koishi'
+import { Context, Schema, h, Logger, Time, Bot, sleep } from 'koishi'
 import Puppeteer from 'koishi-plugin-puppeteer'
 
 export const name = 'twitter-fetcher'
@@ -17,7 +17,6 @@ declare module 'koishi' {
   }
 }
 
-// ===== 类型定义部分 =====
 interface BaseConfig {
   showScreenshot: boolean;
   sendText: boolean;
@@ -29,7 +28,6 @@ interface BaseConfig {
   sub_sendText: boolean;
   sub_sendMedia: boolean;
   sub_useForward: boolean;
-  // 翻译配置类型
   parse_enableTranslation: boolean;
   parse_targetLang: string;
   sub_enableTranslation: boolean;
@@ -53,7 +51,6 @@ type SubscriptionConfig = {
 
 export type Config = BaseConfig & SubscriptionConfig;
 
-// ===== Schema 定义部分 =====
 const langSelectSchema = Schema.union([
   Schema.const('zh-CN').description('简体中文'),
   Schema.const('zh-TW').description('繁體中文'),
@@ -102,7 +99,7 @@ export const Config: Schema<Config> = Schema.intersect([
       enableSubscription: Schema.const(true),
       platform: Schema.string().description('用于执行推送的机器人平台 (例如: onebot)。').required(),
       selfId: Schema.string().description('用于执行推送的机器人账号/ID (例如: 12345678)。').required(),
-      updateInterval: Schema.number().min(1).description('每隔多少分钟检查一次更新。').default(5),
+      updateInterval: Schema.number().min(1).description('每隔多少分钟检查一次更新。').default(30),
       subscriptions: Schema.array(Schema.object({
           username: Schema.string().description('推特用户名'),
           groupIds: Schema.array(String).role('table').description('需要推送的群号列表'),
@@ -117,7 +114,6 @@ export const Config: Schema<Config> = Schema.intersect([
 ]) as Schema<Config>;
 
 
-// ===== 插件 apply 函数及其他逻辑 =====
 
 const TWEET_URL_REGEX = /https?:\/\/(twitter\.com|x\.com)\/(\w+)\/status\/(\d+)/g
 
@@ -139,7 +135,6 @@ async function translateText(ctx: Context, text: string, targetLang: string, log
   }
 }
 
-// ===== 更新 Puppeteer 函数以识别 "reposted" =====
 async function getLatestTweetUrlByPuppeteer(puppeteer: Puppeteer, username: string, cookie: string | undefined, excludeRetweets: boolean, log?: (message: string) => void): Promise<string | null> {
   log?.(`正在访问用户主页: https://x.com/${username}`);
   const page = await puppeteer.page();
@@ -155,8 +150,6 @@ async function getLatestTweetUrlByPuppeteer(puppeteer: Puppeteer, username: stri
         if (socialContextEl) {
           const contextText = socialContextEl.textContent || '';
           if (contextText.includes('Pinned')) continue;
-          
-          // 同时检查新旧两种关键词，确保兼容性
           if (excludeRetweets && (contextText.includes('Retweeted') || contextText.includes('reposted') || contextText.includes('转推'))) {
             continue;
           }
@@ -209,6 +202,7 @@ export function apply(ctx: Context, config: Config) {
     };
   };
 
+
   async function processTweet(
     tweetUrl: string, 
     options: { 
@@ -239,8 +233,9 @@ export function apply(ctx: Context, config: Config) {
       try {
         const screenshotBuffer = await getTweetScreenshot(ctx.puppeteer, tweetUrl, config.cookie, log);
         if (screenshotBuffer) {
-            screenshotElement = h.image(`data:image/png;base64,${screenshotBuffer.toString('base64')}`);
-            log('截图成功并转换为 h.image 元素.');
+
+            screenshotElement = h.image(screenshotBuffer, 'image/png');
+            log('截图成功并准备好 h.image 元素 (Buffer 模式).');
         }
       } catch (error) {
         log(`截图失败: ${error.message}`, true);
@@ -281,11 +276,15 @@ export function apply(ctx: Context, config: Config) {
         log(`发现 ${apiResponse.media_extended.length} 个媒体文件, 准备下载.`);
         for (const [index, media] of apiResponse.media_extended.entries()) {
           try {
+            log(`正在下载媒体文件 ${index + 1}/${apiResponse.media_extended.length} (${media.type}) from ${media.url}`);
             const file = await http.file(media.url);
-            const dataUri = `data:${file.mime};base64,${Buffer.from(file.data).toString('base64')}`;
-            if (media.type === 'image') mediaParts.push(h.image(dataUri));
-            else if (media.type === 'video' || media.type === 'gif') mediaParts.push(h.video(dataUri));
-            log(`媒体文件 ${index + 1}/${apiResponse.media_extended.length} (${media.type}) 下载并转换成功.`);
+            
+            if (media.type === 'image') {
+              mediaParts.push(h.image(file.data, file.mime));
+            } else if (media.type === 'video' || media.type === 'gif') {
+              mediaParts.push(h.video(file.data, file.mime));
+            }
+            log(`媒体文件 ${index + 1}/${apiResponse.media_extended.length} 下载成功 (Buffer 模式).`);
           } catch (error) {
             log(`下载媒体文件失败: ${media.url}, 错误: ${error.message}`, true);
           }
@@ -313,7 +312,6 @@ export function apply(ctx: Context, config: Config) {
     }
   }
 
-  // 中间件: 监听并处理手动发送的链接
   ctx.middleware(async (session, next) => {
     TWEET_URL_REGEX.lastIndex = 0;
     const match = TWEET_URL_REGEX.exec(session.content)
@@ -336,7 +334,6 @@ export function apply(ctx: Context, config: Config) {
     await session.bot.deleteMessage(session.channelId, statusMessage[0]);
   })
   
-  // 订阅功能核心: 检查并推送更新
   async function checkAndPushUpdates(isManualTrigger = false) {
     if (!config.enableSubscription) return;
 
@@ -363,55 +360,59 @@ export function apply(ctx: Context, config: Config) {
         
         if (!latestTweetUrl) {
             log('未能获取到最新推文链接, 跳过.', true);
-            continue;
-        }
 
-        const record = await ctx.database.get('twitter_subscriptions', { id: sub.username });
-        const lastUrl = record[0]?.last_tweet_url;
-        log(`数据库中记录的上次链接: ${lastUrl || '无'}`);
-
-        const isNew = !lastUrl || lastUrl !== latestTweetUrl;
-        const shouldPush = isNew || (isManualTrigger && latestTweetUrl);
-
-        if (shouldPush) {
-          updatesFound++;
-          logger.info(`[订阅] ★★★ 发现 [${sub.username}] 的新推文! ★★★`);
-          log(`准备推送新内容: ${latestTweetUrl}`);
-
-          const messageToSend = await processTweet(latestTweetUrl, {
-            showLink: config.sub_showLink,
-            showScreenshot: config.sub_showScreenshot,
-            sendText: config.sub_sendText,
-            sendMedia: config.sub_sendMedia,
-            useForward: config.sub_useForward,
-            platform: bot.platform,
-            enableTranslation: config.sub_enableTranslation,
-            targetLang: config.sub_targetLang,
-          });
-          
-          for (const groupId of sub.groupIds) {
-            await bot.sendMessage(groupId, messageToSend);
-          }
-          log(`已向 ${sub.groupIds.length} 个群组完成推送.`);
-          
-          if (isNew) {
-              await ctx.database.upsert('twitter_subscriptions', [{ id: sub.username, last_tweet_url: latestTweetUrl }]);
-              log('数据库已更新为最新推文链接.');
-          }
         } else {
-            log('链接无变化, 无需推送.');
+            const record = await ctx.database.get('twitter_subscriptions', { id: sub.username });
+            const lastUrl = record[0]?.last_tweet_url;
+            log(`数据库中记录的上次链接: ${lastUrl || '无'}`);
+
+            const isNew = !lastUrl || lastUrl !== latestTweetUrl;
+            const shouldPush = isNew || (isManualTrigger && latestTweetUrl);
+
+            if (shouldPush) {
+              updatesFound++;
+              logger.info(`[订阅] ★★★ 发现 [${sub.username}] 的新推文! ★★★`);
+              log(`准备推送新内容: ${latestTweetUrl}`);
+
+              const messageToSend = await processTweet(latestTweetUrl, {
+                showLink: config.sub_showLink,
+                showScreenshot: config.sub_showScreenshot,
+                sendText: config.sub_sendText,
+                sendMedia: config.sub_sendMedia,
+                useForward: config.sub_useForward,
+                platform: bot.platform,
+                enableTranslation: config.sub_enableTranslation,
+                targetLang: config.sub_targetLang,
+              });
+              
+              for (const groupId of sub.groupIds) {
+                await bot.sendMessage(groupId, messageToSend);
+              }
+              log(`已向 ${sub.groupIds.length} 个群组完成推送.`);
+              
+              if (isNew) {
+                  await ctx.database.upsert('twitter_subscriptions', [{ id: sub.username, last_tweet_url: latestTweetUrl }]);
+                  log('数据库已更新为最新推文链接.');
+              }
+            } else {
+                log('链接无变化, 无需推送.');
+            }
         }
       } catch (error) {
         logger.warn(`[订阅] 检查 [${sub.username}] 时发生错误:`, error);
       }
+
+
+      if (config.logDetails) logger.info(`[订阅] 处理完 [${sub.username}], 等待 3 秒后继续...`);
+      await sleep(3 * Time.second);
     }
+    
     if (config.logDetails) logger.info(`[订阅] 本轮更新检查结束, 共发现 ${updatesFound} 个更新.`);
     if (isManualTrigger) {
       return `手动检查完成, 共为 ${updatesFound} 个订阅执行了推送任务.`;
     }
   }
 
-  // 如果启用了订阅, 则设置定时器和指令
   if (config.enableSubscription) {
     ctx.setInterval(() => checkAndPushUpdates(false), config.updateInterval * Time.minute);
 
