@@ -149,8 +149,8 @@ async function getLatestTweetUrlByPuppeteer(puppeteer: Puppeteer, username: stri
         const socialContextEl = article.querySelector('[data-testid="socialContext"]');
         if (socialContextEl) {
           const contextText = socialContextEl.textContent || '';
-          if (contextText.includes('Pinned')) continue;
-          if (excludeRetweets && (contextText.includes('Retweeted') || contextText.includes('reposted') || contextText.includes('转推'))) {
+          if (/(pinned|已置顶|置顶|固定|置頂)/i.test(contextText)) continue;
+          if (excludeRetweets && /(retweeted|reposted|retweet|repost|转推|轉推|转发|已转帖)/i.test(contextText)) {
             continue;
           }
         }
