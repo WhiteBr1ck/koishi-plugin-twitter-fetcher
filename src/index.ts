@@ -35,6 +35,9 @@ interface BaseConfig {
   logDetails: boolean;
 }
 
+// 新增：筛选模式类型
+type TweetFilterMode = 'all' | 'mediaOnly' | 'textOnly';
+
 type SubscriptionConfig = {
   enableSubscription: false;
 } | {
@@ -46,6 +49,7 @@ type SubscriptionConfig = {
     username: string;
     groupIds: string[];
     excludeRetweets?: boolean;
+    tweetFilterMode?: TweetFilterMode; // 新增：筛选模式
   }[];
 };
 
@@ -104,6 +108,12 @@ export const Config: Schema<Config> = Schema.intersect([
           username: Schema.string().description('推特用户名'),
           groupIds: Schema.array(String).role('table').description('需要推送的群号列表'),
           excludeRetweets: Schema.boolean().description('是否排除转推(Repost)？').default(true),
+          // 新增：筛选模式（三选一）
+          tweetFilterMode: Schema.union([
+            Schema.const('all').description('全部'),
+            Schema.const('mediaOnly').description('仅含媒体'),
+            Schema.const('textOnly').description('仅纯文字'),
+          ]).role('radio').description('最新推文筛选模式').default('all'),
       })).role('table').description('订阅列表'),
     }),
   ]),
@@ -135,7 +145,14 @@ async function translateText(ctx: Context, text: string, targetLang: string, log
   }
 }
 
-async function getLatestTweetUrlByPuppeteer(puppeteer: Puppeteer, username: string, cookie: string | undefined, excludeRetweets: boolean, log?: (message: string) => void): Promise<string | null> {
+async function getLatestTweetUrlByPuppeteer(
+  puppeteer: Puppeteer, 
+  username: string, 
+  cookie: string | undefined, 
+  excludeRetweets: boolean, 
+  filterMode: TweetFilterMode, // 新增参数：筛选模式
+  log?: (message: string) => void
+): Promise<string | null> {
   log?.(`正在访问用户主页: https://x.com/${username}`);
   const page = await puppeteer.page();
   try {
@@ -143,7 +160,7 @@ async function getLatestTweetUrlByPuppeteer(puppeteer: Puppeteer, username: stri
     await page.goto(`https://x.com/${username}`, { waitUntil: 'networkidle2', timeout: 30000 });
     await page.waitForSelector('article[data-testid="tweet"]', { timeout: 20000 });
     
-    const latestTweetUrl = await page.evaluate((excludeRetweets) => {
+    const latestTweetUrl = await page.evaluate((excludeRetweets, filterMode) => {
       const articles = document.querySelectorAll('article[data-testid="tweet"]');
       for (const article of articles) {
         const socialContextEl = article.querySelector('[data-testid="socialContext"]');
@@ -154,14 +171,25 @@ async function getLatestTweetUrlByPuppeteer(puppeteer: Puppeteer, username: stri
             continue;
           }
         }
+        
+        // 新增：按筛选模式过滤媒体/纯文字
+        if (filterMode !== 'all') {
+          const hasImage = !!article.querySelector('[data-testid="tweetPhoto"], img[alt="Image"]');
+          const hasVideo = !!article.querySelector('video, [data-testid="videoPlayer"]');
+          const hasGif = !!article.querySelector('[data-testid="gifPlayable"]');
+          const hasMedia = hasImage || hasVideo || hasGif;
+          if (filterMode === 'mediaOnly' && !hasMedia) continue;
+          if (filterMode === 'textOnly' && hasMedia) continue;
+        }
+        
         const link = article.querySelector('a[href*="/status/"]');
         if (link) return (link as HTMLAnchorElement).href;
       }
       return null;
-    }, excludeRetweets);
+    }, excludeRetweets, filterMode);
 
     if (latestTweetUrl) {
-      log?.(`成功获取到最新推文链接(已应用转推排除规则): ${latestTweetUrl}`);
+      log?.(`成功获取到最新推文链接(已应用筛选模式: ${filterMode}, 排除转推: ${excludeRetweets}).`);
       return latestTweetUrl;
     }
     logger.warn(`[Puppeteer] 在 ${username} 的主页上未能找到任何符合条件的推文链接.`);
@@ -355,8 +383,17 @@ export function apply(ctx: Context, config: Config) {
 
       try {
         const excludeRetweets = sub.excludeRetweets ?? true;
+        const tweetFilterMode: TweetFilterMode = sub.tweetFilterMode ?? 'all'; // 新增
         log(`转推排除设置为: ${excludeRetweets}`);
-        const latestTweetUrl = await getLatestTweetUrlByPuppeteer(ctx.puppeteer, sub.username, config.cookie, excludeRetweets, log);
+        log(`筛选模式设置为: ${tweetFilterMode}`); // 新增
+        const latestTweetUrl = await getLatestTweetUrlByPuppeteer(
+          ctx.puppeteer, 
+          sub.username, 
+          config.cookie, 
+          excludeRetweets, 
+          tweetFilterMode, // 新增
+          log
+        );
         
         if (!latestTweetUrl) {
             log('未能获取到最新推文链接, 跳过.', true);
@@ -422,7 +459,14 @@ export function apply(ctx: Context, config: Config) {
         await session.send(`正在为 [${username}] 获取最新推文并模拟推送到当前会话...`);
         const log = createLogStepper(`测试:${username}`);
         try {
-          const latestTweetUrl = await getLatestTweetUrlByPuppeteer(ctx.puppeteer, username, config.cookie, true, log);
+          const latestTweetUrl = await getLatestTweetUrlByPuppeteer(
+            ctx.puppeteer, 
+            username, 
+            config.cookie, 
+            true,        // 测试默认排除转推
+            'all',       // 测试默认不过滤（全部）
+            log
+          );
           if (!latestTweetUrl) return '无法找到该用户的最新推文链接(已排除转推).';
           
           await session.send(`成功获取到最新推文链接: ${latestTweetUrl}\n正在生成内容...`);
