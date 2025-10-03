@@ -23,6 +23,7 @@ interface BaseConfig {
   sendMedia: boolean;
   cookie: string;
   useForward: boolean;
+  silentParsing: boolean;
   sub_showLink: boolean;
   sub_showScreenshot: boolean;
   sub_sendText: boolean;
@@ -74,6 +75,7 @@ export const Config: Schema<Config> = Schema.intersect([
     sendMedia: Schema.boolean().description('是否发送推文中的图片和视频。').default(true),
     cookie: Schema.string().role('textarea').description('Twitter/X 登录 Cookie(auth_token).'),
     useForward: Schema.boolean().description('是否使用合并转发的形式发送(仅 QQ 平台效果最佳).').default(false),
+    silentParsing: Schema.boolean().description('是否关闭解析时的加载提示(加载提示指的是：引用用户原消息显示加载中, 然后发送完推文后再撤回)。').default(false),
   }).description('解析设置 - 当手动发送链接时生效'),
 
   Schema.object({
@@ -344,8 +346,11 @@ export function apply(ctx: Context, config: Config) {
     TWEET_URL_REGEX.lastIndex = 0;
     const match = TWEET_URL_REGEX.exec(session.content)
     if (!match) return next()
-    
-    const statusMessage = await session.send(h('quote', { id: session.messageId }) + '正在解析推文链接, 请稍候...')
+
+    let statusMessage: string[] | undefined;
+    if (!config.silentParsing) {
+      statusMessage = await session.send(h('quote', { id: session.messageId }) + '正在解析推文链接, 请稍候...');
+    }
     
     const messageToSend = await processTweet(match[0], {
       showLink: false,
@@ -359,7 +364,9 @@ export function apply(ctx: Context, config: Config) {
     })
     
     await session.send(messageToSend);
-    await session.bot.deleteMessage(session.channelId, statusMessage[0]);
+    if (statusMessage) {
+      await session.bot.deleteMessage(session.channelId, statusMessage[0]);
+    }
   })
   
   async function checkAndPushUpdates(isManualTrigger = false) {
