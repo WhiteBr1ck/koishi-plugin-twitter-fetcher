@@ -21,6 +21,7 @@ interface BaseConfig {
   showScreenshot: boolean;
   sendText: boolean;
   sendMedia: boolean;
+  downloadOriginalImage: boolean; // 新增：是否下载原图
   cookie: string;
   useForward: boolean;
   silentParsing: boolean;
@@ -28,6 +29,7 @@ interface BaseConfig {
   sub_showScreenshot: boolean;
   sub_sendText: boolean;
   sub_sendMedia: boolean;
+  sub_downloadOriginalImage: boolean; // 新增：推送时是否下载原图
   sub_useForward: boolean;
   parse_enableTranslation: boolean;
   parse_targetLang: string;
@@ -73,6 +75,7 @@ export const Config: Schema<Config> = Schema.intersect([
     showScreenshot: Schema.boolean().description('是否发送推文截图。').default(true),
     sendText: Schema.boolean().description('是否发送提取的推文文本。').default(true),
     sendMedia: Schema.boolean().description('是否发送推文中的图片和视频。').default(true),
+    downloadOriginalImage: Schema.boolean().description('是否下载原图（最高画质）。注意：原图体积较大，可能会增加发送时间。').default(false),
     cookie: Schema.string().role('textarea').description('Twitter/X 登录 Cookie(auth_token).'),
     useForward: Schema.boolean().description('是否使用合并转发的形式发送(仅 QQ 平台效果最佳).').default(false),
     silentParsing: Schema.boolean().description('是否关闭解析时的加载提示(加载提示指的是：引用用户原消息显示加载中, 然后发送完推文后再撤回)。').default(false),
@@ -83,6 +86,7 @@ export const Config: Schema<Config> = Schema.intersect([
     sub_showScreenshot: Schema.boolean().description('推送时, 是否发送推文截图。').default(true),
     sub_sendText: Schema.boolean().description('推送时, 是否发送提取的推文文本。').default(true),
     sub_sendMedia: Schema.boolean().description('推送时, 是否发送推文中的图片和视频。').default(true),
+    sub_downloadOriginalImage: Schema.boolean().description('推送时, 是否下载原图（最高画质）。注意：原图体积较大，可能会增加发送时间。').default(false),
     sub_useForward: Schema.boolean().description('推送时, 是否使用合并转发。').default(false),
   }).description('订阅推送内容设置 - 当自动推送订阅时生效'),
 
@@ -235,12 +239,13 @@ export function apply(ctx: Context, config: Config) {
 
   async function processTweet(
     tweetUrl: string, 
-    options: { 
-      showLink?: boolean; 
-      showScreenshot: boolean; 
-      sendText: boolean; 
-      sendMedia: boolean; 
-      useForward: boolean; 
+    options: {
+      showLink?: boolean;
+      showScreenshot: boolean;
+      sendText: boolean;
+      sendMedia: boolean;
+      downloadOriginalImage?: boolean; // 新增
+      useForward: boolean;
       platform?: string;
       enableTranslation?: boolean;
       targetLang?: string;
@@ -306,8 +311,15 @@ export function apply(ctx: Context, config: Config) {
         log(`发现 ${apiResponse.media_extended.length} 个媒体文件, 准备下载.`);
         for (const [index, media] of apiResponse.media_extended.entries()) {
           try {
-            log(`正在下载媒体文件 ${index + 1}/${apiResponse.media_extended.length} (${media.type}) from ${media.url}`);
-            const file = await http.file(media.url);
+            let mediaUrl = media.url;
+            
+            if (media.type === 'image' && options.downloadOriginalImage) {
+                mediaUrl = mediaUrl.replace(/(\.\w+)$/, '$1:orig');
+                log(`已启用原图下载, URL 转换为: ${mediaUrl}`);
+            }
+
+            log(`正在下载媒体文件 ${index + 1}/${apiResponse.media_extended.length} (${media.type}) from ${mediaUrl}`);
+            const file = await http.file(mediaUrl);
             
             if (media.type === 'image') {
               mediaParts.push(h.image(file.data, file.mime));
@@ -357,6 +369,7 @@ export function apply(ctx: Context, config: Config) {
       showScreenshot: config.showScreenshot,
       sendText: config.sendText,
       sendMedia: config.sendMedia,
+      downloadOriginalImage: config.downloadOriginalImage, // 修复：传入配置
       useForward: config.useForward,
       platform: session.platform,
       enableTranslation: config.parse_enableTranslation,
@@ -423,6 +436,7 @@ export function apply(ctx: Context, config: Config) {
                 showScreenshot: config.sub_showScreenshot,
                 sendText: config.sub_sendText,
                 sendMedia: config.sub_sendMedia,
+                downloadOriginalImage: config.sub_downloadOriginalImage, // 传入配置
                 useForward: config.sub_useForward,
                 platform: bot.platform,
                 enableTranslation: config.sub_enableTranslation,
@@ -483,6 +497,7 @@ export function apply(ctx: Context, config: Config) {
             showScreenshot: config.sub_showScreenshot,
             sendText: config.sub_sendText,
             sendMedia: config.sub_sendMedia,
+            downloadOriginalImage: config.sub_downloadOriginalImage, // 传入配置
             useForward: config.sub_useForward,
             platform: session.platform,
             enableTranslation: config.sub_enableTranslation,
