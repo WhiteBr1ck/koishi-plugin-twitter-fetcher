@@ -438,10 +438,33 @@ async function getTweetDataByBrowser(puppeteer: Puppeteer, tweetUrl: string, coo
       for (const item of html.match(/https:\/\/video\.twimg\.com\/[^"'< >]+/g) || []) urls.push(item)
 
       const textEl = article.querySelector('[data-testid="tweetText"]')
+      const getFallbackText = () => {
+        const clone = article!.cloneNode(true) as HTMLElement
+        clone.querySelectorAll([
+          '[data-testid="User-Name"]',
+          '[data-testid="tweetPhoto"]',
+          '[data-testid="videoPlayer"]',
+          '[data-testid="gifPlayable"]',
+          '[data-testid="socialContext"]',
+          '[role="group"]',
+          'time',
+          'svg',
+          'img',
+          'video',
+          'source',
+        ].join(',')).forEach(node => node.remove())
+        return Array.from(clone.querySelectorAll('div[lang], span[lang], [dir="auto"]'))
+          .map(node => node.textContent?.trim() || '')
+          .filter(text => text && !/^[@\d\s.,:：]+$/.test(text))
+          .join('\n')
+          .trim()
+      }
+      const text = textEl?.textContent?.trim() || getFallbackText()
       const authorNameEl = article.querySelector('[data-testid="User-Name"] span')
       const authorIdHref = Array.from(article.querySelectorAll('a[href]')).map((item: any) => item.getAttribute('href') || '').find((href: string) => /^\/[^/]+$/.test(href))
       return {
-        text: textEl?.textContent?.trim() || '',
+        text,
+        textFallback: !!text && !textEl?.textContent?.trim(),
         author: authorNameEl?.textContent?.trim() || '',
         userScreenName: authorIdHref ? authorIdHref.slice(1) : '',
         urls,
@@ -464,6 +487,7 @@ async function getTweetDataByBrowser(puppeteer: Puppeteer, tweetUrl: string, coo
       const gateHint = data?.gateText && hasPotentialMediaGate(data.gateText) ? '检测到页面可能存在年龄墙或敏感内容遮挡。' : ''
       log?.(`${gateHint}目标推文 DOM 未确认任何媒体，已拒绝发送 ${captured.size} 个浏览器捕获资源，避免误发头像或页面图标。`, true)
     }
+    if (data?.textFallback) log?.('未找到 tweetText 节点，已从目标推文可见文本中提取正文。')
     const media = Array.from(captured.entries()).filter(([key]) => domKeys.has(key)).map(([, value]) => value)
     log?.(`浏览器解析完成: text=${data?.text ? 'yes' : 'no'}, domMedia=${domKeys.size}, capturedMedia=${captured.size}, media=${media.length}`)
     return {
