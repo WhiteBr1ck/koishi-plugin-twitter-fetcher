@@ -33,6 +33,7 @@ interface BaseConfig {
   separateMediaSend: boolean
   tweetFetchMode: FetchMode
   mediaFetchMode: FetchMode
+  apiProvider: ApiProvider
   gifMode: GifMode
   tempPath: string
   imageTransferMode: FileTransferMode
@@ -51,6 +52,7 @@ interface BaseConfig {
 }
 
 type FetchMode = 'api' | 'browser'
+type ApiProvider = 'vxtwitter' | 'fxtwitter'
 type FileTransferMode = 'buffer' | 'url' | 'base64' | 'file'
 type GifMode = 'video' | 'realGif'
 type TweetFilterMode = 'all' | 'mediaOnly' | 'textOnly'
@@ -104,6 +106,11 @@ const fetchModeSchema = Schema.union([
   Schema.const('browser').description('浏览器'),
 ]).role('radio')
 
+const apiProviderSchema = Schema.union([
+  Schema.const('vxtwitter').description('vxtwitter'),
+  Schema.const('fxtwitter').description('fxtwitter'),
+]).role('radio')
+
 const fileTransferSchema = Schema.union([
   Schema.const('buffer').description('buffer'),
   Schema.const('url').description('url'),
@@ -150,8 +157,9 @@ export const Config: Schema<Config> = Schema.intersect([
   }).description('翻译设置'),
 
   Schema.object({
-    tweetFetchMode: fetchModeSchema.description('推文文本获取方式。API 使用 vxtwitter；浏览器读取 X 页面上可见文本。').default('api'),
-    mediaFetchMode: fetchModeSchema.description('媒体获取方式。API 使用 vxtwitter；浏览器从 X 页面与网络响应中提取媒体资源。').default('api'),
+    apiProvider: apiProviderSchema.description('API 来源。vxtwitter 兼容性好；fxtwitter 对长文 Note Tweet 的正文支持更完整。').default('vxtwitter'),
+    tweetFetchMode: fetchModeSchema.description('推文文本获取方式。API 使用所选 API 来源；浏览器读取 X 页面上可见文本。').default('api'),
+    mediaFetchMode: fetchModeSchema.description('媒体获取方式。API 使用所选 API 来源；浏览器从 X 页面与网络响应中提取媒体资源。').default('api'),
   }).description('获取方式设置'),
 
   Schema.object({
@@ -200,6 +208,24 @@ const TWEET_URL_REGEX = /https?:\/\/(twitter\.com|x\.com)\/(\w+)\/status\/(\d+)/
 
 function extractTweetId(tweetUrl: string) {
   return tweetUrl.match(/\/status\/(\d+)/)?.[1]
+}
+
+function buildTweetApiUrl(tweetUrl: string, host: string) {
+  try {
+    const parsed = new URL(tweetUrl)
+    return `https://${host}${parsed.pathname}`
+  } catch {
+    return tweetUrl.replace(/https?:\/\/(twitter\.com|x\.com)/, `https://${host}`).replace(/\?.*$/, '')
+  }
+}
+
+function parseJsonResponse(response: any) {
+  if (typeof response !== 'string') return response
+  try {
+    return JSON.parse(response)
+  } catch {
+    return {}
+  }
 }
 
 function normalizeTwitterImageUrl(url: string, useOriginal: boolean) {
@@ -356,12 +382,33 @@ async function getTweetScreenshot(puppeteer: Puppeteer, url: string, cookie?: st
   }
 }
 
-async function getTweetDataByApi(ctx: Context, tweetUrl: string, useOriginal: boolean, log?: (message: string) => void): Promise<TweetData> {
-  const apiUrl = tweetUrl.replace(/(twitter\.com|x\.com)/, 'api.vxtwitter.com')
-  log?.(`使用 vxtwitter API 进行解析: ${apiUrl}`)
+async function getTweetDataByApi(ctx: Context, tweetUrl: string, useOriginal: boolean, provider: ApiProvider, log?: (message: string) => void): Promise<TweetData> {
+  const apiUrl = buildTweetApiUrl(tweetUrl, provider === 'fxtwitter' ? 'api.fxtwitter.com' : 'api.vxtwitter.com')
+  log?.(`使用 ${provider} API 进行解析: ${apiUrl}`)
   const http = ctx.http.extend({ headers: { 'User-Agent': 'Koishi-Twitter-Fetcher' } })
-  const apiResponse = await http.get(apiUrl)
-  log?.('成功接收到 vxtwitter API 的响应.')
+  const apiResponse = parseJsonResponse(await http.get(apiUrl, { responseType: 'text' }))
+  log?.(`成功接收到 ${provider} API 的响应.`)
+
+  if (provider === 'fxtwitter') {
+    const tweet = apiResponse.tweet || apiResponse.data?.tweet || apiResponse.data || apiResponse || {}
+    const media: TweetMedia[] = []
+    const mediaItems = tweet.media?.all || tweet.media?.photos || (Array.isArray(tweet.media) ? tweet.media : [])
+    for (const item of mediaItems) {
+      let mediaUrl = item.url
+      const type = item.type === 'photo' ? 'image' : inferMediaType(mediaUrl, item.type)
+      if (type === 'image') mediaUrl = normalizeTwitterImageUrl(mediaUrl, useOriginal)
+      media.push({ url: mediaUrl, type })
+    }
+    const text = String(tweet.text || tweet.raw_text?.text || '')
+    const userScreenName = tweet.author?.screen_name || tweet.user_screen_name || tweet.user?.screen_name
+    log?.(`fxtwitter 解析结果: text=${text ? 'yes' : 'no'}, media=${media.length}`)
+    return {
+      userScreenName,
+      author: tweet.author?.name,
+      text,
+      media,
+    }
+  }
 
   const media: TweetMedia[] = []
   for (const item of apiResponse.media_extended || []) {
@@ -630,7 +677,7 @@ export function apply(ctx: Context, config: Config) {
   async function loadTweetData(tweetUrl: string, useOriginal: boolean, log?: (message: string, isWarning?: boolean) => void): Promise<TweetData> {
     const needApi = config.tweetFetchMode === 'api' || config.mediaFetchMode === 'api'
     const needBrowser = config.tweetFetchMode === 'browser' || config.mediaFetchMode === 'browser'
-    const apiData = needApi ? await getTweetDataByApi(ctx, tweetUrl, useOriginal, log) : null
+    const apiData = needApi ? await getTweetDataByApi(ctx, tweetUrl, useOriginal, config.apiProvider, log) : null
     const browserData = needBrowser ? await getTweetDataByBrowser(ctx.puppeteer, tweetUrl, config.cookie, useOriginal, log) : null
     const textSource = config.tweetFetchMode === 'browser' ? browserData : apiData
     const mediaSource = config.mediaFetchMode === 'browser' ? browserData : apiData
@@ -872,7 +919,3 @@ export function apply(ctx: Context, config: Config) {
       })
   }
 }
-
-
-
-

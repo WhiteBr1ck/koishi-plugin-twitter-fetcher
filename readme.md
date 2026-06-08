@@ -57,11 +57,14 @@
 
 ### 4. 获取方式设置
 
+*   **`apiProvider`**: API 来源。默认 `vxtwitter`。
+    *   **`vxtwitter`**: 兼容性较好，返回结构简单，旧版本默认来源。部分 X 长文/Note Tweet 可能只返回短文本片段。
+    *   **`fxtwitter`**: 对长文/Note Tweet 的正文支持通常更完整，也会返回替换后的外链文本。返回结构与 vxtwitter 不同，插件会做兼容转换。
 *   **`tweetFetchMode`**: 推文文本获取方式。默认 `api`。
-    *   **`api`**: 使用 `vxtwitter.com` API，速度快，结构稳定。
+    *   **`api`**: 使用上方选择的 API 来源，速度快，不依赖浏览器访问 X 页面。
     *   **`browser`**: 使用 Puppeteer 访问 X 页面并读取页面可见文本。若 X 页面已显示 Grok 翻译，通常能读取到翻译后的文本。
 *   **`mediaFetchMode`**: 媒体获取方式。默认 `api`。
-    *   **`api`**: 使用 `vxtwitter.com` API 返回的媒体地址。
+    *   **`api`**: 使用上方选择的 API 来源返回的媒体地址。
     *   **`browser`**: 从 X 页面 DOM 和网络响应中提取 `pbs.twimg.com` 与 `video.twimg.com` 媒体地址。
 
 ### 5. 文件发送设置
@@ -115,7 +118,7 @@
 
 ## 注意事项
 
-*   API 模式依赖 `vxtwitter.com` 的可用性。
+*   API 模式依赖所选 API 来源的可用性。`vxtwitter` 通常兼容性较好；`fxtwitter` 对长文/Note Tweet 正文通常更完整。
 *   浏览器模式依赖 X 前端页面结构，X 页面更新可能导致提取失败。
 *   浏览器媒体模式只会发送目标推文 DOM 中确认过的媒体。遇到年龄墙、敏感内容遮挡或登录墙导致目标媒体不可见时，会返回空媒体，避免误发头像、图标或页面资源。
 *   浏览器媒体模式对图片较稳，对视频只能尽量提取目标推文页面和网络响应中可确认属于该推文的候选地址。
@@ -128,11 +131,13 @@
 
 *   **Koishi**: 提供了一切的基础。
 *   **`vxtwitter.com`**: 提供了稳定、好用的推文解析 API。
+*   **`fxtwitter.com`**: 提供了对长文/Note Tweet 更完整的推文解析 API。
 *   **shangxue 的 `bilibili-videolink-analysis` 插件**: 本插件的文件处理方案深受其启发，特此感谢。
 *   特别鸣谢：Google Gemini 2.5 Pro。
 
 ## 更新日志
 
+*   **v2.0.4**: 新增 API 来源选择，支持 `vxtwitter` 与 `fxtwitter`。`fxtwitter` 对长文/Note Tweet 正文支持更完整，并已兼容其返回结构。
 *   **v2.0.3**: 增强浏览器获取模式的正文提取逻辑。当 X 页面未提供标准 tweetText 节点但目标推文 DOM 已加载时，会尝试从目标推文可见文本中提取正文。
 *   **v2.0.2**: 修复 v2.0.1 中浏览器媒体安全日志类型不匹配导致的 TypeScript 编译错误。
 *   **v2.0.1**: 修复浏览器媒体模式在年龄墙、敏感内容遮挡或登录墙下可能误发头像、图标等页面资源的问题。现在只会发送目标推文 DOM 中确认过的媒体。
