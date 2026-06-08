@@ -245,6 +245,10 @@ function sanitizeMediaUrl(url: string) {
     .replace(/[),.;\]]+$/g, '')
 }
 
+function hasPotentialMediaGate(text: string) {
+  return /(age-restricted|adult content|sensitive content|potentially sensitive|sign in to confirm|年龄|成人内容|敏感内容|可能包含敏感)/i.test(text)
+}
+
 function mimeToExtension(mime = '') {
   if (mime.includes('png')) return '.png'
   if (mime.includes('webp')) return '.webp'
@@ -441,6 +445,7 @@ async function getTweetDataByBrowser(puppeteer: Puppeteer, tweetUrl: string, coo
         author: authorNameEl?.textContent?.trim() || '',
         userScreenName: authorIdHref ? authorIdHref.slice(1) : '',
         urls,
+        gateText: `${article.textContent || ''}\n${document.body.textContent || ''}`,
       }
     }, tweetId)
 
@@ -455,7 +460,11 @@ async function getTweetDataByBrowser(puppeteer: Puppeteer, tweetUrl: string, coo
         addMedia(url, mediaType)
       }
     }
-    const media = Array.from(captured.entries()).filter(([key]) => !domKeys.size || domKeys.has(key)).map(([, value]) => value)
+    if (!domKeys.size && captured.size) {
+      const gateHint = data?.gateText && hasPotentialMediaGate(data.gateText) ? '检测到页面可能存在年龄墙或敏感内容遮挡。' : ''
+      log?.(`${gateHint}目标推文 DOM 未确认任何媒体，已拒绝发送 ${captured.size} 个浏览器捕获资源，避免误发头像或页面图标。`, true)
+    }
+    const media = Array.from(captured.entries()).filter(([key]) => domKeys.has(key)).map(([, value]) => value)
     log?.(`浏览器解析完成: text=${data?.text ? 'yes' : 'no'}, domMedia=${domKeys.size}, capturedMedia=${captured.size}, media=${media.length}`)
     return {
       text: data?.text || '',
