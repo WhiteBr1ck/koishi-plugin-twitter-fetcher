@@ -380,7 +380,7 @@ async function getTweetDataByApi(ctx: Context, tweetUrl: string, useOriginal: bo
   }
 }
 
-async function getTweetDataByBrowser(puppeteer: Puppeteer, tweetUrl: string, cookie: string | undefined, useOriginal: boolean, log?: (message: string) => void): Promise<TweetData> {
+async function getTweetDataByBrowser(puppeteer: Puppeteer, tweetUrl: string, cookie: string | undefined, useOriginal: boolean, log?: (message: string, isWarning?: boolean) => void): Promise<TweetData> {
   const page = await puppeteer.page()
   const captured = new Map<string, TweetMedia>()
   const addMedia = (url: string, type?: MediaType) => {
