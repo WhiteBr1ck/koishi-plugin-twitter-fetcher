@@ -19,6 +19,11 @@ declare module 'koishi' {
       id: string
       last_tweet_url: string
     }
+    twitter_hashtag_subscriptions: {
+      id: string
+      last_tweet_id: string
+      pending_tweet_urls: string[]
+    }
   }
 }
 
@@ -84,6 +89,20 @@ type ProcessedTweet = {
   media: h[]
 }
 
+type HashtagSubscription = {
+  hashtag: string
+  groupIds: string[]
+  excludeRetweets?: boolean
+  excludeReplies?: boolean
+  tweetFilterMode?: TweetFilterMode
+  maxPostsPerCheck?: number
+}
+
+type HashtagTweetRef = {
+  id: string
+  url: string
+}
+
 type SubscriptionConfig = {
   enableSubscription: false
 } | {
@@ -97,6 +116,7 @@ type SubscriptionConfig = {
     excludeRetweets?: boolean
     tweetFilterMode?: TweetFilterMode
   }[]
+  hashtagSubscriptions?: HashtagSubscription[]
 }
 
 export type Config = BaseConfig & SubscriptionConfig
@@ -195,7 +215,19 @@ export const Config: Schema<Config> = Schema.intersect([
           Schema.const('mediaOnly').description('仅含媒体'),
           Schema.const('textOnly').description('仅纯文字'),
         ]).role('radio').description('最新推文筛选模式').default('all'),
-      })).role('table').description('订阅列表'),
+      })).role('table').description('用户订阅列表'),
+      hashtagSubscriptions: Schema.array(Schema.object({
+        hashtag: Schema.string().description('话题标签，可填写 #AI 或 AI。'),
+        groupIds: Schema.array(String).role('table').description('需要推送的群号列表'),
+        excludeRetweets: Schema.boolean().description('是否排除转推(Repost)？').default(true),
+        excludeReplies: Schema.boolean().description('是否排除回复(Reply)？').default(true),
+        tweetFilterMode: Schema.union([
+          Schema.const('all').description('全部'),
+          Schema.const('mediaOnly').description('仅含媒体'),
+          Schema.const('textOnly').description('仅纯文字'),
+        ]).role('radio').description('话题搜索结果筛选模式').default('all'),
+        maxPostsPerCheck: Schema.number().min(1).max(10).description('每轮最多推送多少条该话题的新推文。其余已发现推文会进入待推送队列。').default(3),
+      })).role('table').description('话题标签订阅列表').default([]),
     }),
   ]),
 
@@ -208,6 +240,32 @@ const TWEET_URL_REGEX = /https?:\/\/(twitter\.com|x\.com)\/(\w+)\/status\/(\d+)/
 
 function extractTweetId(tweetUrl: string) {
   return tweetUrl.match(/\/status\/(\d+)/)?.[1]
+}
+
+function normalizeHashtag(value: string) {
+  return value.trim().replace(/^#+/, '').trim()
+}
+
+function compareTweetIds(left: string, right: string) {
+  try {
+    const a = BigInt(left)
+    const b = BigInt(right)
+    return a === b ? 0 : a < b ? -1 : 1
+  } catch {
+    return left.localeCompare(right)
+  }
+}
+
+function mergePendingTweetUrls(current: string[], incoming: HashtagTweetRef[]) {
+  const byId = new Map<string, string>()
+  for (const url of current) byId.set(extractTweetId(url) || url, url)
+  for (const item of incoming) byId.set(item.id, item.url)
+  return Array.from(byId.values()).sort((left, right) => {
+    const leftId = extractTweetId(left)
+    const rightId = extractTweetId(right)
+    if (!leftId || !rightId) return left.localeCompare(right)
+    return compareTweetIds(leftId, rightId)
+  })
 }
 
 function buildTweetApiUrl(tweetUrl: string, host: string) {
@@ -362,6 +420,75 @@ async function getLatestTweetUrlByPuppeteer(
     }
     logger.warn(`[Puppeteer] 在 ${username} 的主页上未能找到任何符合条件的推文链接.`)
     return null
+  } finally {
+    await page.close()
+  }
+}
+
+async function getLatestTweetUrlsByHashtag(
+  puppeteer: Puppeteer,
+  hashtag: string,
+  cookie: string | undefined,
+  excludeRetweets: boolean,
+  excludeReplies: boolean,
+  filterMode: TweetFilterMode,
+  limit: number,
+  log?: (message: string) => void
+): Promise<HashtagTweetRef[]> {
+  const normalized = normalizeHashtag(hashtag)
+  if (!normalized) return []
+
+  const searchUrl = `https://x.com/search?q=${encodeURIComponent(`#${normalized}`)}&src=typed_query&f=live`
+  log?.(`正在搜索话题 #${normalized}: ${searchUrl}`)
+  const page = await puppeteer.page()
+  try {
+    if (cookie) await page.setCookie({ name: 'auth_token', value: cookie, domain: '.x.com', path: '/', httpOnly: true, secure: true })
+    await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 30000 })
+    await page.waitForSelector('article[data-testid="tweet"]', { timeout: 20000 })
+
+    const targetCount = Math.min(Math.max(limit, 10), 100)
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const count = await page.$$eval('article[data-testid="tweet"]', items => items.length)
+      if (count >= targetCount) break
+      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight))
+      await sleep(800)
+    }
+
+    const refs = await page.evaluate((excludeRetweets, excludeReplies, filterMode) => {
+      const result: { id: string; url: string }[] = []
+      for (const article of Array.from(document.querySelectorAll('article[data-testid="tweet"]'))) {
+        const articleText = article.textContent || ''
+        if (/(promoted|推广|广告)/i.test(articleText)) continue
+
+        const socialContext = article.querySelector('[data-testid="socialContext"]')?.textContent || ''
+        if (excludeRetweets && /(retweeted|reposted|retweet|repost|转推|轉推|转发|已转帖)/i.test(socialContext)) continue
+        if (excludeReplies && /(replying to|回复|回覆)/i.test(articleText)) continue
+
+        if (filterMode !== 'all') {
+          const hasImage = !!article.querySelector('[data-testid="tweetPhoto"], img[alt="Image"]')
+          const hasVideo = !!article.querySelector('video, [data-testid="videoPlayer"]')
+          const hasGif = !!article.querySelector('[data-testid="gifPlayable"]')
+          const hasMedia = hasImage || hasVideo || hasGif
+          if (filterMode === 'mediaOnly' && !hasMedia) continue
+          if (filterMode === 'textOnly' && hasMedia) continue
+        }
+
+        const timedLink = article.querySelector('a[href*="/status/"] time')?.closest('a')
+        const link = timedLink || article.querySelector('a[href*="/status/"]')
+        if (!link) continue
+        const path = new URL((link as HTMLAnchorElement).href, location.origin).pathname
+        const match = path.match(/^\/([^/]+)\/status\/(\d+)/)
+        if (!match) continue
+        result.push({ id: match[2], url: `https://x.com/${match[1]}/status/${match[2]}` })
+      }
+      return result
+    }, excludeRetweets, excludeReplies, filterMode)
+
+    const unique = new Map<string, HashtagTweetRef>()
+    for (const item of refs) unique.set(item.id, item)
+    const sorted = Array.from(unique.values()).sort((left, right) => compareTweetIds(right.id, left.id))
+    log?.(`话题 #${normalized} 搜索完成, 获取 ${sorted.length} 条候选推文.`)
+    return sorted.slice(0, targetCount)
   } finally {
     await page.close()
   }
@@ -563,6 +690,11 @@ export function apply(ctx: Context, config: Config) {
   logger.info('Twitter Fetcher 插件已启动.')
 
   ctx.model.extend('twitter_subscriptions', { id: 'string', last_tweet_url: 'string' }, { primary: 'id' })
+  ctx.model.extend('twitter_hashtag_subscriptions', {
+    id: 'string',
+    last_tweet_id: 'string',
+    pending_tweet_urls: 'list',
+  }, { primary: 'id' })
 
   ctx.inject(['console'], (ctx) => {
     const baseDir = __dirname
@@ -877,8 +1009,102 @@ export function apply(ctx: Context, config: Config) {
       await sleep(3 * Time.second)
     }
 
-    if (config.logDetails) logger.info(`[订阅] 本轮更新检查结束, 共发现 ${updatesFound} 个更新.`)
-    if (isManualTrigger) return `手动检查完成, 共为 ${updatesFound} 个订阅执行了推送任务.`
+    for (const sub of config.hashtagSubscriptions || []) {
+      const normalized = normalizeHashtag(sub.hashtag || '')
+      if (!normalized || !sub.groupIds || sub.groupIds.length === 0) continue
+
+      const stateId = normalized.toLowerCase()
+      const log = createLogStepper(`话题:#${normalized}`)
+      const maxPostsPerCheck = Math.min(Math.max(sub.maxPostsPerCheck ?? 3, 1), 10)
+      const searchLimit = Math.min(Math.max(maxPostsPerCheck * 10, 30), 100)
+
+      try {
+        const records = await ctx.database.get('twitter_hashtag_subscriptions', { id: stateId })
+        const state = records[0]
+        const refs = await getLatestTweetUrlsByHashtag(
+          ctx.puppeteer,
+          normalized,
+          config.cookie,
+          sub.excludeRetweets ?? true,
+          sub.excludeReplies ?? true,
+          sub.tweetFilterMode ?? 'all',
+          searchLimit,
+          log
+        )
+
+        if (!state) {
+          if (refs.length > 0) {
+            await ctx.database.upsert('twitter_hashtag_subscriptions', [{
+              id: stateId,
+              last_tweet_id: refs[0].id,
+              pending_tweet_urls: [],
+            }])
+            log(`首次启用话题订阅, 已以 ${refs[0].id} 建立基线，不推送历史结果.`)
+          } else {
+            log('未获取到话题搜索结果, 暂不建立基线.', true)
+          }
+          continue
+        }
+
+        const newRefs = refs
+          .filter(item => compareTweetIds(item.id, state.last_tweet_id) > 0)
+          .sort((left, right) => compareTweetIds(left.id, right.id))
+        let pendingUrls = mergePendingTweetUrls(state.pending_tweet_urls || [], newRefs)
+        const newestId = newRefs.length ? newRefs[newRefs.length - 1].id : state.last_tweet_id
+
+        if (newRefs.length > 0) {
+          log(`发现 ${newRefs.length} 条新的话题推文，加入待推送队列.`)
+          await ctx.database.upsert('twitter_hashtag_subscriptions', [{
+            id: stateId,
+            last_tweet_id: newestId,
+            pending_tweet_urls: pendingUrls,
+          }])
+        }
+
+        let sentThisCheck = 0
+        while (pendingUrls.length > 0 && sentThisCheck < maxPostsPerCheck) {
+          const tweetUrl = pendingUrls[0]
+          try {
+            logger.info(`[话题订阅] ★ 发现 #${normalized} 新推文: ${tweetUrl}`)
+            const messageToSend = await processTweet(tweetUrl, {
+              showLink: config.sub_showLink,
+              showScreenshot: config.sub_showScreenshot,
+              sendText: config.sub_sendText,
+              sendMedia: config.sub_sendMedia,
+              downloadOriginalImage: config.sub_downloadOriginalImage,
+              useForward: config.sub_useForward,
+              platform: bot.platform,
+              enableTranslation: config.sub_enableTranslation,
+              targetLang: config.sub_targetLang,
+            })
+            for (const groupId of sub.groupIds) await sendProcessedTweet(message => bot.sendMessage(groupId, message), messageToSend)
+
+            pendingUrls = pendingUrls.slice(1)
+            sentThisCheck++
+            updatesFound++
+            await ctx.database.upsert('twitter_hashtag_subscriptions', [{
+              id: stateId,
+              last_tweet_id: newestId,
+              pending_tweet_urls: pendingUrls,
+            }])
+          } catch (error) {
+            logger.warn(`[话题订阅] 推送 #${normalized} 的 ${tweetUrl} 时发生错误，保留在队列等待重试:`, error)
+            break
+          }
+        }
+
+        if (pendingUrls.length > 0) log(`本轮达到推送上限，队列中仍有 ${pendingUrls.length} 条待推送推文.`)
+        else if (!newRefs.length && !sentThisCheck) log('没有新的话题推文.')
+      } catch (error) {
+        logger.warn(`[话题订阅] 检查 #${normalized} 时发生错误:`, error)
+      }
+
+      if (config.logDetails) logger.info(`[话题订阅] 处理完 #${normalized}, 等待 3 秒后继续...`)
+      await sleep(3 * Time.second)
+    }
+
+    if (config.logDetails) logger.info(`[订阅] 本轮更新检查结束, 共执行 ${updatesFound} 次推送.`)
+    if (isManualTrigger) return `手动检查完成, 共执行了 ${updatesFound} 次推送任务.`
   }
 
   if (config.enableSubscription) {
@@ -907,6 +1133,34 @@ export function apply(ctx: Context, config: Config) {
           await sendProcessedTweet(message => session.send(message), messageToSend)
         } catch (error) {
           logger.warn(`[测试] 测试 [${username}] 时出错:`, error)
+          return `测试失败: ${error.message}`
+        }
+      })
+
+    ctx.command('测试话题标签推送 <hashtag:string>', '测试指定话题标签的最新推文能否被正确搜索和推送')
+      .action(async ({ session }, hashtag) => {
+        const normalized = normalizeHashtag(hashtag || '')
+        if (!normalized) return '请输入要测试的话题标签.'
+        await session.send(`正在搜索话题 #${normalized} 的最新推文...`)
+        const log = createLogStepper(`测试话题:#${normalized}`)
+        try {
+          const refs = await getLatestTweetUrlsByHashtag(ctx.puppeteer, normalized, config.cookie, true, true, 'all', 10, log)
+          if (!refs.length) return `未找到话题 #${normalized} 的可推送推文.`
+          await session.send(`成功获取到最新话题推文: ${refs[0].url}\n正在生成内容...`)
+          const messageToSend = await processTweet(refs[0].url, {
+            showLink: config.sub_showLink,
+            showScreenshot: config.sub_showScreenshot,
+            sendText: config.sub_sendText,
+            sendMedia: config.sub_sendMedia,
+            downloadOriginalImage: config.sub_downloadOriginalImage,
+            useForward: config.sub_useForward,
+            platform: session.platform,
+            enableTranslation: config.sub_enableTranslation,
+            targetLang: config.sub_targetLang,
+          })
+          await sendProcessedTweet(message => session.send(message), messageToSend)
+        } catch (error) {
+          logger.warn(`[测试] 测试话题 #${normalized} 时出错:`, error)
           return `测试失败: ${error.message}`
         }
       })
