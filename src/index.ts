@@ -300,18 +300,70 @@ async function ensureDir(path: string) {
   await fs.mkdir(path, { recursive: true })
 }
 
+const GOOGLE_TRANSLATE_URL = 'https://translate.googleapis.com/translate_a/single'
+const GOOGLE_TRANSLATE_MAX_CHARS = 4500
+
+function splitTextForTranslation(text: string, maxLength = GOOGLE_TRANSLATE_MAX_CHARS) {
+  const chunks: string[] = []
+  let start = 0
+
+  while (start < text.length) {
+    let end = Math.min(start + maxLength, text.length)
+    if (end < text.length) {
+      const minSplit = start + Math.floor(maxLength / 2)
+      const splitPoints = [
+        text.lastIndexOf('\n', end),
+        text.lastIndexOf('。', end),
+        text.lastIndexOf('. ', end),
+        text.lastIndexOf('! ', end),
+        text.lastIndexOf('? ', end),
+        text.lastIndexOf(' ', end),
+      ].filter(index => index >= minSplit)
+      if (splitPoints.length) end = Math.max(...splitPoints) + 1
+    }
+    chunks.push(text.slice(start, end))
+    start = end
+  }
+
+  return chunks
+}
+
+function extractGoogleTranslatedText(response: any): string | null {
+  if (!Array.isArray(response?.[0])) return null
+  const translatedText = response[0]
+    .map((item: any) => Array.isArray(item) && typeof item[0] === 'string' ? item[0] : '')
+    .join('')
+  return translatedText || null
+}
+
 async function translateText(ctx: Context, text: string, targetLang: string, log?: (message: string) => void): Promise<string | null> {
   if (!text) return null
-  const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${targetLang}&dt=t&q=${encodeURIComponent(text)}`
+  const chunks = splitTextForTranslation(text)
+  const url = `${GOOGLE_TRANSLATE_URL}?client=gtx&sl=auto&tl=${encodeURIComponent(targetLang)}&dt=t&ie=UTF-8&oe=UTF-8`
+  const translatedChunks: string[] = []
+
   try {
-    log?.(`调用谷歌翻译 API...`)
-    const response = await ctx.http.get<any[]>(url)
-    if (response && response[0]) {
-      const translatedText = response[0].map(item => item[0]).join('')
-      log?.(`翻译成功, 目标语言: ${targetLang}.`)
-      return translatedText
+    log?.(`调用谷歌翻译 API${chunks.length > 1 ? `, 共 ${chunks.length} 段` : ''}...`)
+    for (const [index, chunk] of chunks.entries()) {
+      if (chunks.length > 1) log?.(`正在翻译第 ${index + 1}/${chunks.length} 段...`)
+      const body = new URLSearchParams({ q: chunk })
+      const response = parseJsonResponse(await ctx.http.post(url, body, {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+          'User-Agent': 'Koishi-Twitter-Fetcher',
+        },
+        responseType: 'text',
+        timeout: 15000,
+      }))
+      const translatedText = extractGoogleTranslatedText(response)
+      if (!translatedText) {
+        logger.warn(`[翻译] 谷歌翻译 API 第 ${index + 1}/${chunks.length} 段返回了无法解析的响应.`)
+        return null
+      }
+      translatedChunks.push(translatedText)
     }
-    return null
+    log?.(`翻译成功, 目标语言: ${targetLang}.`)
+    return translatedChunks.join('')
   } catch (error) {
     logger.warn(`[翻译] 调用谷歌翻译 API 失败:`, error)
     return null
