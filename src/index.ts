@@ -845,7 +845,11 @@ export function apply(ctx: Context, config: Config) {
         } else {
           const record = await ctx.database.get('twitter_subscriptions', { id: sub.username })
           const lastUrl = record[0]?.last_tweet_url
-          const isNew = !lastUrl || lastUrl !== latestTweetUrl
+          const latestTweetId = extractTweetId(latestTweetUrl)
+          const lastTweetId = lastUrl ? extractTweetId(lastUrl) : undefined
+          const isNew = !lastUrl || (latestTweetId && lastTweetId
+            ? latestTweetId !== lastTweetId
+            : lastUrl !== latestTweetUrl)
           const shouldPush = isNew || (isManualTrigger && latestTweetUrl)
 
           if (shouldPush) {
@@ -863,10 +867,25 @@ export function apply(ctx: Context, config: Config) {
               targetLang: config.sub_targetLang,
             })
 
-            for (const groupId of sub.groupIds) await sendProcessedTweet(message => bot.sendMessage(groupId, message), messageToSend)
-            if (isNew) await ctx.database.upsert('twitter_subscriptions', [{ id: sub.username, last_tweet_url: latestTweetUrl }])
+            let successfulGroups = 0
+            let failedGroups = 0
+            for (const groupId of sub.groupIds) {
+              try {
+                await sendProcessedTweet(message => bot.sendMessage(groupId, message), messageToSend)
+                successfulGroups++
+              } catch (error) {
+                failedGroups++
+                logger.warn(`[订阅] 向群 [${groupId}] 推送 [${sub.username}] 的推文失败:`, error)
+              }
+            }
+            if (isNew && successfulGroups > 0) {
+              await ctx.database.upsert('twitter_subscriptions', [{ id: sub.username, last_tweet_url: latestTweetUrl }])
+              log(`已有 ${successfulGroups} 个群推送成功，已记录最新推文状态。`)
+            }
+            if (failedGroups > 0) log(`有 ${failedGroups} 个群推送失败。`, true)
+            if (successfulGroups === 0) log('所有目标群均推送失败，未更新推文状态，下轮将继续尝试。', true)
           } else {
-            log('链接无变化, 无需推送.')
+            log('推文 ID/链接无变化, 无需推送.')
           }
         }
       } catch (error) {
