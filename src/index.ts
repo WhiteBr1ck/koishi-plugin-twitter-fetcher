@@ -867,23 +867,23 @@ export function apply(ctx: Context, config: Config) {
               targetLang: config.sub_targetLang,
             })
 
-            // 内容已成功生成后立即记录状态，避免发送过程中部分成功后抛错，
-            // 导致下一轮仍将同一条推文判断为新内容并重复刷屏。
-            if (isNew) {
-              await ctx.database.upsert('twitter_subscriptions', [{ id: sub.username, last_tweet_url: latestTweetUrl }])
-              log('已记录最新推文状态，后续单个群发送失败不会重复推送同一条内容。')
-            }
-
+            let successfulGroups = 0
             let failedGroups = 0
             for (const groupId of sub.groupIds) {
               try {
                 await sendProcessedTweet(message => bot.sendMessage(groupId, message), messageToSend)
+                successfulGroups++
               } catch (error) {
                 failedGroups++
                 logger.warn(`[订阅] 向群 [${groupId}] 推送 [${sub.username}] 的推文失败:`, error)
               }
             }
-            if (failedGroups > 0) log(`有 ${failedGroups} 个群推送失败，已跳过自动重试以避免重复发送。`, true)
+            if (isNew && successfulGroups > 0) {
+              await ctx.database.upsert('twitter_subscriptions', [{ id: sub.username, last_tweet_url: latestTweetUrl }])
+              log(`已有 ${successfulGroups} 个群推送成功，已记录最新推文状态。`)
+            }
+            if (failedGroups > 0) log(`有 ${failedGroups} 个群推送失败。`, true)
+            if (successfulGroups === 0) log('所有目标群均推送失败，未更新推文状态，下轮将继续尝试。', true)
           } else {
             log('推文 ID/链接无变化, 无需推送.')
           }
