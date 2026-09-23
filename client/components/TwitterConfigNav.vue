@@ -33,6 +33,17 @@
           {{ item.label }}
         </div>
       </div>
+      <div v-if="hashtagItems.length" :class="$style.section">
+        <div :class="$style.sectionTitle">话题标签</div>
+        <div
+          v-for="item in hashtagItems"
+          :key="item.id"
+          :class="[$style.item, activeItem === `hashtag-${item.id}` ? $style.active : '']"
+          @click="toHashtag(item.id)"
+        >
+          {{ item.label }}
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -45,8 +56,13 @@ interface SubscriptionConfig {
   username?: string
 }
 
+interface HashtagSubscriptionConfig {
+  hashtag?: string
+}
+
 interface TwitterFetcherConfig {
   subscriptions?: SubscriptionConfig[]
+  hashtagSubscriptions?: HashtagSubscriptionConfig[]
 }
 
 const current = inject<ComputedRef<{ config: TwitterFetcherConfig }>>('manager.settings.current')
@@ -56,10 +72,10 @@ const activeItem = ref('')
 const staticItems = [
   { id: 'parse', label: '解析设置', keys: ['showScreenshot', 'sendText', 'silentParsing'] },
   { id: 'subscription-content', label: '订阅推送内容', keys: ['sub_showLink', 'sub_sendText', 'sub_sendMedia'] },
-  { id: 'translation', label: '翻译设置', keys: ['parse_enableTranslation', 'sub_enableTranslation'] },
+  { id: 'translation', label: '翻译设置', keys: ['translationProvider', 'chatlunaModel', 'parse_enableTranslation', 'sub_enableTranslation'] },
   { id: 'fetch', label: '获取方式设置', keys: ['tweetFetchMode', 'mediaFetchMode'] },
   { id: 'files', label: '文件发送设置', keys: ['separateMediaSend', 'imageTransferMode', 'videoTransferMode', 'gifMode'] },
-  { id: 'subscription', label: '订阅设置', keys: ['enableSubscription', 'platform', 'subscriptions'] },
+  { id: 'subscription', label: '订阅设置', keys: ['enableSubscription', 'platform', 'subscriptions', 'hashtagSubscriptions'] },
   { id: 'debug', label: '调试设置', keys: ['logDetails'] },
 ]
 
@@ -71,6 +87,18 @@ const subscriptionItems = computed(() => {
       id: String(index),
       label: username || `订阅 ${index + 1}`,
       username,
+    }
+  })
+})
+
+const hashtagItems = computed(() => {
+  const list = current?.value?.config?.hashtagSubscriptions ?? []
+  return list.map((item, index) => {
+    const hashtag = item?.hashtag?.trim().replace(/^#+/, '')
+    return {
+      id: String(index),
+      label: hashtag ? `#${hashtag}` : `话题 ${index + 1}`,
+      hashtag,
     }
   })
 })
@@ -113,12 +141,33 @@ function toSchema(id: string, keys: string[]) {
 }
 
 function toSubscription(index: string) {
+  const row = document.querySelector(`[data-twitter-subscription-index="${index}"]`) as HTMLElement | null
+  if (row) {
+    row.scrollIntoView({ block: 'center' })
+    activeItem.value = `sub-${index}`
+    return
+  }
   const keys = [`subscriptions.${index}.username`, `subscriptions[${index}].username`]
   const username = subscriptionItems.value[Number(index)]?.username
   const node = findSchemaNode((text) => keys.some((key) => text.includes(key)) || (!!username && text.includes(username)))
   if (!node) return
   node.scrollIntoView({ block: 'center' })
   activeItem.value = `sub-${index}`
+}
+
+function toHashtag(index: string) {
+  const row = document.querySelector(`[data-twitter-hashtag-index="${index}"]`) as HTMLElement | null
+  if (row) {
+    row.scrollIntoView({ block: 'center' })
+    activeItem.value = `hashtag-${index}`
+    return
+  }
+  const keys = [`hashtagSubscriptions.${index}.hashtag`, `hashtagSubscriptions[${index}].hashtag`]
+  const hashtag = hashtagItems.value[Number(index)]?.hashtag
+  const node = findSchemaNode((text) => keys.some((key) => text.includes(key)) || (!!hashtag && text.includes(hashtag)))
+  if (!node) return
+  node.scrollIntoView({ block: 'center' })
+  activeItem.value = `hashtag-${index}`
 }
 
 function getPointer(ev: MouseEvent | TouchEvent) {
@@ -185,6 +234,18 @@ function initObserver() {
       observer.observe(node)
     }
   }
+  document.querySelectorAll('[data-twitter-subscription-index]').forEach((node) => {
+    const index = (node as HTMLElement).dataset.twitterSubscriptionIndex
+    if (index === undefined) return
+    observed.set(node, `sub-${index}`)
+    observer?.observe(node)
+  })
+  document.querySelectorAll('[data-twitter-hashtag-index]').forEach((node) => {
+    const index = (node as HTMLElement).dataset.twitterHashtagIndex
+    if (index === undefined) return
+    observed.set(node, `hashtag-${index}`)
+    observer?.observe(node)
+  })
 }
 
 window.addEventListener('mousemove', onMousemove)

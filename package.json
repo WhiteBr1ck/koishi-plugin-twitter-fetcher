@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-twitter-fetcher",
-  "description": "一个推特/Twitter/X内容获取与订阅插件，支持链接实时解析和用户后台订阅推送。",
-  "version": "2.0.4",
+  "description": "一个推特/Twitter/X内容获取与订阅插件，支持链接解析、用户订阅和话题标签订阅。",
+  "version": "2.1.0",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
@@ -29,6 +29,7 @@
     "resolver",
     "subscribe",
     "subscription",
+    "hashtag",
     "push",
     "gif",
     "ffmpeg",
@@ -37,12 +38,13 @@
   "peerDependencies": {
     "@koishijs/plugin-console": "^5.30.0",
     "koishi": "^4.18.7",
+    "koishi-plugin-chatluna": "^1.3.0",
     "koishi-plugin-ffmpeg": "^1.1.0",
     "koishi-plugin-puppeteer": "*"
   },
   "koishi": {
     "description": {
-      "zh": "自动解析推特/Twitter/X链接，聚合内容。支持订阅推送、浏览器原生获取、真 GIF 和多种媒体发送方式。"
+      "zh": "自动解析推特/Twitter/X链接，支持用户与话题标签订阅、浏览器原生获取、翻译、真 GIF 和多种媒体发送方式。"
     },
     "service": {
       "required": [
@@ -51,15 +53,26 @@
       ],
       "optional": [
         "console",
-        "ffmpeg"
+        "ffmpeg",
+        "chatluna"
       ]
     }
   },
   "scripts": {
-    "build": "esbuild src/index.ts --bundle --platform=node --format=cjs --target=node18 --external:koishi --external:koishi-plugin-puppeteer --external:@koishijs/plugin-console --outfile=lib/index.js && tsc --emitDeclarationOnly"
+    "build": "esbuild src/index.ts --bundle --platform=node --format=cjs --target=node18 --external:koishi --external:koishi-plugin-puppeteer --external:@koishijs/plugin-console --external:koishi-plugin-chatluna/* --external:@the-convocation/twitter-scraper --outfile=lib/index.js && tsc --emitDeclarationOnly",
+    "build:client": "node -e \"import('@koishijs/client/lib').then(({ build }) => build(process.cwd()))\""
+  },
+  "dependencies": {
+    "@the-convocation/twitter-scraper": "0.22.3"
+  },
+  "devDependencies": {
+    "@koishijs/client": "^5.30.4"
   },
   "peerDependenciesMeta": {
     "@koishijs/plugin-console": {
+      "optional": true
+    },
+    "koishi-plugin-chatluna": {
       "optional": true
     },
     "koishi-plugin-ffmpeg": {
